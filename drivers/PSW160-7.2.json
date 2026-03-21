@@ -1,0 +1,17 @@
+{
+  "model": "PSW160-7.2",
+  "brand": "GW Instek",
+  "full_name": "GW Instek PSW160-7.2 Programmable DC Power Supply",
+  "max_voltage": 160.0,
+  "max_current": 7.2,
+  "connection": "USB",
+  "termination": "\n",
+  "commands": {
+    "set_voltage":     "VOLT {v}",
+    "set_current":     "CURR {i}",
+    "output_on":       "OUTP ON",
+    "output_off":      "OUTP OFF",
+    "measure_voltage": "MEAS:VOLT?",
+    "measure_current": "MEAS:CURR?"
+  }
+}
