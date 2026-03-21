@@ -28,7 +28,7 @@ class LivePlot(tk.Frame):
         self._fig = Figure(figsize=(5, 3), dpi=96, facecolor="#1a1a2e")
         self._ax_v = self._fig.add_subplot(211)
         self._ax_i = self._fig.add_subplot(212, sharex=self._ax_v)
-        self._fig.subplots_adjust(left=0.12, right=0.97, top=0.92, bottom=0.12, hspace=0.35)
+        self._fig.subplots_adjust(left=0.10, right=0.99, top=0.97, bottom=0.08, hspace=0.20)
 
         self._line_v, = self._ax_v.plot([], [], color="#00d4ff", linewidth=1.5)
         self._line_i, = self._ax_i.plot([], [], color="#ff9900", linewidth=1.5)

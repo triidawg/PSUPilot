@@ -53,7 +53,7 @@ def _list_com_ports() -> list[str]:
 
 class StepRow(ctk.CTkFrame):
     COLS = ["#", "Voltage (V)", "Current (A)", "Ramp (s)", "Dwell (s)"]
-    WIDTHS = [35, 90, 90, 80, 80]
+    WIDTHS = [28, 72, 72, 62, 62]
 
     def __init__(self, master, index: int, **kwargs):
         super().__init__(master, fg_color="transparent", **kwargs)
@@ -160,7 +160,6 @@ class App(ctk.CTk):
     def _build_editor(self):
         frame = ctk.CTkFrame(self)
         frame.grid(row=1, column=0, sticky="nsew", padx=(8, 4), pady=8)
-        frame.grid_rowconfigure(1, weight=1)
         frame.grid_columnconfigure(0, weight=1)
 
         ctk.CTkLabel(frame, text="CYCLE EDITOR", font=("", 13, "bold")).grid(
@@ -175,7 +174,7 @@ class App(ctk.CTk):
                 row=0, column=col, padx=2)
 
         # Scrollable step list
-        self._step_scroll = ctk.CTkScrollableFrame(frame, width=420, height=320)
+        self._step_scroll = ctk.CTkScrollableFrame(frame, width=310, height=320)
         self._step_scroll.grid(row=2, column=0, sticky="nsew", padx=4, pady=4)
         frame.grid_rowconfigure(2, weight=1)
 
@@ -209,7 +208,7 @@ class App(ctk.CTk):
             row=0, column=0, sticky="w", padx=8, pady=(6, 2))
 
         self._plot = LivePlot(frame)
-        self._plot.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
+        self._plot.grid(row=1, column=0, sticky="nsew", padx=0, pady=2)
 
         readout = ctk.CTkFrame(frame, fg_color="transparent")
         readout.grid(row=2, column=0, sticky="ew", padx=8, pady=(0, 6))
