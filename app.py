@@ -82,6 +82,8 @@ class StepRow(ctk.CTkFrame):
 
     # Optional callback(msg: str) to surface validation warnings in the editor
     _cls_warning_callback = None
+    # Optional callback(row) called when a row is clicked/focused
+    _cls_select_callback = None
 
     @classmethod
     def set_psu_limits(cls, max_v: float, max_i: float):
@@ -92,11 +94,18 @@ class StepRow(ctk.CTkFrame):
     def set_warning_callback(cls, cb):
         cls._cls_warning_callback = cb
 
+    @classmethod
+    def set_select_callback(cls, cb):
+        cls._cls_select_callback = cb
+
     def __init__(self, master, index: int, **kwargs):
         super().__init__(master, fg_color="transparent", **kwargs)
+        self._selected = False
         self._index_label = ctk.CTkLabel(self, text=str(index + 1), width=self.WIDTHS[0],
                                           anchor="center", font=("Consolas", 12))
         self._index_label.grid(row=0, column=0, padx=1)
+        self._index_label.bind("<Button-1>", self._on_click)
+        self.bind("<Button-1>", self._on_click)
 
         self._entries: list[ctk.CTkEntry] = []
         # Default current is "MAX" so it auto-fills from the PSU profile
@@ -109,9 +118,22 @@ class StepRow(ctk.CTkFrame):
 
         self._setup_validation()
 
+    def _on_click(self, _event=None):
+        if StepRow._cls_select_callback:
+            StepRow._cls_select_callback(self)
+
+    def select(self, active: bool):
+        self._selected = active
+        if not self._selected:
+            self.configure(fg_color="transparent")
+        else:
+            self.configure(fg_color="#2a2a3a")
+
     def _setup_validation(self):
         self._entries[0].bind("<FocusOut>", self._on_voltage_focusout)
         self._entries[1].bind("<FocusOut>", self._on_current_focusout)
+        for e in self._entries:
+            e.bind("<FocusIn>", self._on_click)
 
     def _on_voltage_focusout(self, _event=None):
         e = self._entries[0]
@@ -194,8 +216,10 @@ class StepRow(ctk.CTkFrame):
                 e.insert(0, str(val))
 
     def highlight(self, active: bool):
-        color = "#1a3a5c" if active else "transparent"
-        self.configure(fg_color=color)
+        if active:
+            self.configure(fg_color="#1a3a5c")
+        else:
+            self.configure(fg_color="#2a2a3a" if self._selected else "transparent")
 
 
 # ---------------------------------------------------------------------------
@@ -221,9 +245,11 @@ class App(ctk.CTk):
 
         self._build_ui()
 
-        # Load limits for the default-selected PSU and wire up the warning callback
+        # Load limits for the default-selected PSU and wire up callbacks
         self._load_psu_limits(self._psu_var.get())
         StepRow.set_warning_callback(self._show_editor_warning)
+        StepRow.set_select_callback(self._on_row_selected)
+        self._selected_idx: int = 0
 
         self._plot_refresh_loop()
 
@@ -310,6 +336,7 @@ class App(ctk.CTk):
         self._add_step()
         self._step_rows[1].set_values({"voltage": 0.0, "current": "MAX",
                                         "ramp": 1.0, "dwell": 5.0})
+        self._select_row(0)
 
         # Buttons
         btn_bar = ctk.CTkFrame(frame, fg_color="transparent")
@@ -523,28 +550,48 @@ class App(ctk.CTk):
         row = StepRow(self._step_scroll, index=len(self._step_rows))
         row.pack(fill="x", pady=1)
         self._step_rows.append(row)
+        self._select_row(len(self._step_rows) - 1)
 
     def _remove_step(self):
         if len(self._step_rows) <= 1:
             return
-        row = self._step_rows.pop()
+        idx = self._selected_idx
+        row = self._step_rows.pop(idx)
         row.destroy()
+        # Re-number remaining rows
+        for i, r in enumerate(self._step_rows):
+            r.set_index(i)
+        new_idx = min(idx, len(self._step_rows) - 1)
+        self._select_row(new_idx)
 
     def _move_up(self):
-        if len(self._step_rows) < 2:
+        idx = self._selected_idx
+        if idx <= 0 or len(self._step_rows) < 2:
             return
-        self._swap_step_values(-2, -1)
+        self._swap_step_values(idx, idx - 1)
+        self._select_row(idx - 1)
 
     def _move_down(self):
-        if len(self._step_rows) < 2:
+        idx = self._selected_idx
+        if idx >= len(self._step_rows) - 1 or len(self._step_rows) < 2:
             return
-        self._swap_step_values(-1, -2)
+        self._swap_step_values(idx, idx + 1)
+        self._select_row(idx + 1)
 
     def _swap_step_values(self, a: int, b: int):
         va = self._step_rows[a].get_raw_values()
         vb = self._step_rows[b].get_raw_values()
         self._step_rows[a].set_values(vb)
         self._step_rows[b].set_values(va)
+
+    def _on_row_selected(self, row: StepRow):
+        if row in self._step_rows:
+            self._select_row(self._step_rows.index(row))
+
+    def _select_row(self, idx: int):
+        self._selected_idx = idx
+        for i, row in enumerate(self._step_rows):
+            row.select(i == idx)
 
     def _show_editor_warning(self, msg: str):
         self._editor_warning_label.configure(text=msg)
@@ -782,6 +829,7 @@ class App(ctk.CTk):
             for step in steps:
                 self._add_step()
                 self._step_rows[-1].set_values(step)
+            self._select_row(0)
 
             # Restore loop count
             self._loops_entry.delete(0, "end")
