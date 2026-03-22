@@ -383,19 +383,19 @@ class App(ctk.CTk):
         # Row 2 — fixed-width progress labels, locked so nothing shifts
         prog_row = ctk.CTkFrame(left, fg_color="transparent")
         prog_row.pack(anchor="w", pady=(3, 0))
-        self._step_label  = ctk.CTkLabel(prog_row, text="Step: –/–",  width=110,
+        self._step_label  = ctk.CTkLabel(prog_row, text="Step: –/–",  width=90,
                                           anchor="w", font=("Consolas", 12))
-        self._loop_label  = ctk.CTkLabel(prog_row, text="Loop: –/–",  width=130,
+        self._loop_label  = ctk.CTkLabel(prog_row, text="Loop: –/–",  width=90,
                                           anchor="w", font=("Consolas", 12))
-        self._dwell_label = ctk.CTkLabel(prog_row, text="Dwell: –",   width=160,
+        self._dwell_label = ctk.CTkLabel(prog_row, text="Dwell: –",   width=140,
                                           anchor="w", font=("Consolas", 12))
-        self._step_label.pack(side="left")
-        self._loop_label.pack(side="left")
+        self._step_label.pack(side="left", padx=(0, 10))
+        self._loop_label.pack(side="left", padx=(0, 10))
         self._dwell_label.pack(side="left")
 
         # Middle: run controls
         mid = ctk.CTkFrame(bar, fg_color="transparent")
-        mid.pack(side="left", padx=20, pady=8)
+        mid.pack(side="left", padx=8, pady=8)
 
         self._run_btn = ctk.CTkButton(mid, text="▶ Run", width=90,
                                        fg_color="#2d6a2d", hover_color="#3a8a3a",
