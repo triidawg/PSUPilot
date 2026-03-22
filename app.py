@@ -376,8 +376,18 @@ class App(ctk.CTk):
         self._loops_entry.grid(row=0, column=1, padx=4)
         ctk.CTkLabel(left, text="(0 = ∞)").grid(row=0, column=2, padx=2)
 
-        self._progress_label = ctk.CTkLabel(left, text="Step: –/–   Loop: –/–   Dwell: –")
-        self._progress_label.grid(row=1, column=0, columnspan=4, sticky="w", pady=(4, 0))
+        # Three fixed-width labels so the layout never shifts when text changes
+        prog = ctk.CTkFrame(left, fg_color="transparent")
+        prog.grid(row=1, column=0, columnspan=4, sticky="w", pady=(4, 0))
+        self._step_label  = ctk.CTkLabel(prog, text="Step: –/–",  width=110,
+                                          anchor="w", font=("Consolas", 12))
+        self._loop_label  = ctk.CTkLabel(prog, text="Loop: –/–",  width=130,
+                                          anchor="w", font=("Consolas", 12))
+        self._dwell_label = ctk.CTkLabel(prog, text="Dwell: –",   width=160,
+                                          anchor="w", font=("Consolas", 12))
+        self._step_label.pack(side="left")
+        self._loop_label.pack(side="left")
+        self._dwell_label.pack(side="left")
 
         # Middle: run controls
         mid = ctk.CTkFrame(bar, fg_color="transparent")
@@ -641,18 +651,13 @@ class App(ctk.CTk):
     def _update_progress(self, step_idx: int, loop_idx: int, dwell_remaining):
         n_steps = self._total_steps
         n_loops = self._total_loops
-        loop_str = f"{loop_idx}/{'∞' if n_loops == 0 else n_loops}"
-        step_str = f"{step_idx + 1}/{n_steps}"
-        dwell_str = f"{dwell_remaining:.0f}s left" if dwell_remaining is not None else "–"
-        self._progress_label.configure(
-            text=f"Step: {step_str}   Loop: {loop_str}   Dwell: {dwell_str}")
+        self._step_label.configure(text=f"Step: {step_idx + 1}/{n_steps}")
+        self._loop_label.configure(text=f"Loop: {loop_idx}/{'∞' if n_loops == 0 else n_loops}")
+        if dwell_remaining is not None:
+            self._dwell_label.configure(text=f"Dwell: {dwell_remaining:.0f}s left")
 
     def _update_dwell(self, remaining: float):
-        current_text = self._progress_label.cget("text")
-        parts = current_text.split("Dwell: ")
-        if len(parts) == 2:
-            self._progress_label.configure(
-                text=f"{parts[0]}Dwell: {remaining:.0f}s left")
+        self._dwell_label.configure(text=f"Dwell: {remaining:.0f}s left")
 
     def _highlight_step(self, active_idx: int):
         for i, row in enumerate(self._step_rows):
@@ -660,7 +665,9 @@ class App(ctk.CTk):
 
     def _on_run_finished(self):
         self._set_run_state(False)
-        self._progress_label.configure(text="Step: –/–   Loop: –/–   Dwell: –")
+        self._step_label.configure(text="Step: –/–")
+        self._loop_label.configure(text="Loop: –/–")
+        self._dwell_label.configure(text="Dwell: –")
         for row in self._step_rows:
             row.highlight(False)
 
