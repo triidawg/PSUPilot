@@ -5,6 +5,7 @@ app.py — Main CustomTkinter application window.
 import csv
 import json
 import os
+import sys
 import glob
 import threading
 import tkinter as tk
@@ -20,8 +21,17 @@ from live_plot import LivePlot
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
-PROFILES_DIR = os.path.join(os.path.dirname(__file__), "profiles")
-DRIVERS_DIR = os.path.join(os.path.dirname(__file__), "drivers")
+# When frozen by PyInstaller the bundled files live in sys._MEIPASS;
+# user data (profiles) must live next to the exe so they persist between runs.
+if getattr(sys, "frozen", False):
+    _RESOURCE_DIR = sys._MEIPASS
+    _DATA_DIR = os.path.dirname(sys.executable)
+else:
+    _RESOURCE_DIR = os.path.dirname(__file__)
+    _DATA_DIR = os.path.dirname(__file__)
+
+PROFILES_DIR = os.path.join(_DATA_DIR, "profiles")
+DRIVERS_DIR = os.path.join(_RESOURCE_DIR, "drivers")
 
 os.makedirs(PROFILES_DIR, exist_ok=True)
 
