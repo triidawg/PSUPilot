@@ -373,12 +373,12 @@ class App(ctk.CTk):
         # Row 1 — loops group, tightly packed
         loops_row = ctk.CTkFrame(left, fg_color="transparent")
         loops_row.pack(anchor="w")
-        ctk.CTkLabel(loops_row, text="Loops:").pack(side="left", padx=(0, 3))
+        ctk.CTkLabel(loops_row, text="Loops:").pack(side="left", padx=(0, 8))
         self._loops_entry = ctk.CTkEntry(loops_row, width=52, justify="center")
         self._loops_entry.insert(0, "1")
         self._loops_entry.pack(side="left")
         ctk.CTkLabel(loops_row, text="(0 = ∞)", text_color="#888888",
-                     font=("", 11)).pack(side="left", padx=(4, 0))
+                     font=("", 11)).pack(side="left", padx=(10, 0))
 
         # Row 2 — fixed-width progress labels, locked so nothing shifts
         prog_row = ctk.CTkFrame(left, fg_color="transparent")
