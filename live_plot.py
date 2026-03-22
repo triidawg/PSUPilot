@@ -61,6 +61,10 @@ class LivePlot(tk.Frame):
         """Set display mode: 'sweep' or 'full'."""
         self._mode = mode
 
+    def get_data(self) -> tuple[list[float], list[float], list[float]]:
+        """Return (times, voltages, currents) lists — full buffer regardless of display mode."""
+        return list(self._times), list(self._voltages), list(self._currents)
+
     def add_sample(self, voltage: float, current: float):
         if not self._times:
             self._t0 = time.monotonic()  # anchor t=0 to first real data point
@@ -68,8 +72,6 @@ class LivePlot(tk.Frame):
         self._times.append(t)
         self._voltages.append(voltage)
         self._currents.append(current)
-        if self._mode == "sweep":
-            self._trim_old(t)
 
     def refresh(self):
         if not self._times:
@@ -78,14 +80,17 @@ class LivePlot(tk.Frame):
         vs = list(self._voltages)
         cs = list(self._currents)
 
-        self._line_v.set_data(ts, vs)
-        self._line_i.set_data(ts, cs)
-
         t_max = ts[-1]
         if self._mode == "sweep":
             t_min = max(0.0, t_max - WINDOW_SECONDS)
+            cutoff = t_max - WINDOW_SECONDS
+            idx = next((i for i, t in enumerate(ts) if t >= cutoff), 0)
+            ts, vs, cs = ts[idx:], vs[idx:], cs[idx:]
         else:
             t_min = 0.0
+
+        self._line_v.set_data(ts, vs)
+        self._line_i.set_data(ts, cs)
 
         self._ax_v.set_xlim(t_min, t_max + 1)
         self._ax_i.set_xlim(t_min, t_max + 1)
@@ -110,13 +115,3 @@ class LivePlot(tk.Frame):
         self._line_i.set_data([], [])
         self._mpl_canvas.draw_idle()
 
-    # ------------------------------------------------------------------
-    # Internal
-    # ------------------------------------------------------------------
-
-    def _trim_old(self, t_now: float):
-        cutoff = t_now - WINDOW_SECONDS
-        while self._times and self._times[0] < cutoff:
-            self._times.popleft()
-            self._voltages.popleft()
-            self._currents.popleft()

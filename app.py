@@ -2,6 +2,7 @@
 app.py — Main CustomTkinter application window.
 """
 
+import csv
 import json
 import os
 import glob
@@ -221,7 +222,10 @@ class App(ctk.CTk):
         self._full_btn = ctk.CTkButton(hdr, text="Full", width=65,
                                         fg_color="#333333", hover_color="#444444",
                                         command=lambda: self._set_graph_mode("full"))
-        self._full_btn.grid(row=0, column=2, padx=(2, 0))
+        self._full_btn.grid(row=0, column=2, padx=(2, 4))
+        ctk.CTkButton(hdr, text="Export CSV", width=90,
+                      fg_color="#2d4a2d", hover_color="#3a6a3a",
+                      command=self._export_csv).grid(row=0, column=3, padx=(4, 0))
 
         self._plot = LivePlot(frame)
         self._plot.grid(row=1, column=0, sticky="nsew", padx=0, pady=2)
@@ -540,6 +544,26 @@ class App(ctk.CTk):
     # -----------------------------------------------------------------------
     # Save / Load profiles
     # -----------------------------------------------------------------------
+
+    def _export_csv(self):
+        times, voltages, currents = self._plot.get_data()
+        if not times:
+            messagebox.showinfo("Export CSV", "No data to export.")
+            return
+        path = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            with open(path, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["Time (s)", "Voltage (V)", "Current (A)"])
+                for t, v, i in zip(times, voltages, currents):
+                    writer.writerow([f"{t:.3f}", f"{v:.4f}", f"{i:.4f}"])
+        except Exception as exc:
+            messagebox.showerror("Export Error", str(exc))
 
     def _save_profile(self):
         steps = self._get_steps()
