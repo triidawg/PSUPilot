@@ -363,26 +363,31 @@ class App(ctk.CTk):
 
     # --- Controls bar ---
     def _build_controls(self):
-        bar = ctk.CTkFrame(self, height=52, corner_radius=0)
+        bar = ctk.CTkFrame(self, height=62, corner_radius=0)
         bar.grid(row=2, column=0, columnspan=2, sticky="ew")
 
-        # Left side: loops group + progress labels all on one horizontal line
+        # Left side: two rows, both left-aligned
         left = ctk.CTkFrame(bar, fg_color="transparent")
-        left.pack(side="left", padx=12, pady=8)
+        left.pack(side="left", padx=12, pady=6)
 
-        ctk.CTkLabel(left, text="Loops:").pack(side="left", padx=(0, 3))
-        self._loops_entry = ctk.CTkEntry(left, width=52, justify="center")
+        # Row 1 — loops group, tightly packed
+        loops_row = ctk.CTkFrame(left, fg_color="transparent")
+        loops_row.pack(anchor="w")
+        ctk.CTkLabel(loops_row, text="Loops:").pack(side="left", padx=(0, 3))
+        self._loops_entry = ctk.CTkEntry(loops_row, width=52, justify="center")
         self._loops_entry.insert(0, "1")
         self._loops_entry.pack(side="left")
-        ctk.CTkLabel(left, text="(0=∞)", text_color="#888888",
-                     font=("", 11)).pack(side="left", padx=(3, 16))
+        ctk.CTkLabel(loops_row, text="(0 = ∞)", text_color="#888888",
+                     font=("", 11)).pack(side="left", padx=(4, 0))
 
-        # Three fixed-width labels — locked widths prevent any shifting
-        self._step_label  = ctk.CTkLabel(left, text="Step: –/–",  width=110,
+        # Row 2 — fixed-width progress labels, locked so nothing shifts
+        prog_row = ctk.CTkFrame(left, fg_color="transparent")
+        prog_row.pack(anchor="w", pady=(3, 0))
+        self._step_label  = ctk.CTkLabel(prog_row, text="Step: –/–",  width=110,
                                           anchor="w", font=("Consolas", 12))
-        self._loop_label  = ctk.CTkLabel(left, text="Loop: –/–",  width=130,
+        self._loop_label  = ctk.CTkLabel(prog_row, text="Loop: –/–",  width=130,
                                           anchor="w", font=("Consolas", 12))
-        self._dwell_label = ctk.CTkLabel(left, text="Dwell: –",   width=160,
+        self._dwell_label = ctk.CTkLabel(prog_row, text="Dwell: –",   width=160,
                                           anchor="w", font=("Consolas", 12))
         self._step_label.pack(side="left")
         self._loop_label.pack(side="left")
