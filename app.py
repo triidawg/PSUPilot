@@ -48,6 +48,16 @@ def _list_com_ports() -> list[str]:
     return ports if ports else ["(none)"]
 
 
+def _read_psu_limits(path: str) -> tuple[float, float]:
+    """Returns (max_voltage, max_current) from a driver JSON file."""
+    try:
+        with open(path) as f:
+            d = json.load(f)
+        return float(d["max_voltage"]), float(d["max_current"])
+    except Exception:
+        return 9999.0, 9999.0
+
+
 # ---------------------------------------------------------------------------
 # Step row widget
 # ---------------------------------------------------------------------------
@@ -56,6 +66,22 @@ class StepRow(ctk.CTkFrame):
     COLS = ["#", "Voltage (V)", "Current (A)", "Ramp (s)", "Dwell (s)"]
     WIDTHS = [24, 62, 62, 54, 54]
 
+    # Class-level PSU limits — updated by App when the PSU selection changes
+    _cls_max_voltage: float = 9999.0
+    _cls_max_current: float = 9999.0
+
+    # Optional callback(msg: str) to surface validation warnings in the editor
+    _cls_warning_callback = None
+
+    @classmethod
+    def set_psu_limits(cls, max_v: float, max_i: float):
+        cls._cls_max_voltage = max_v
+        cls._cls_max_current = max_i
+
+    @classmethod
+    def set_warning_callback(cls, cb):
+        cls._cls_warning_callback = cb
+
     def __init__(self, master, index: int, **kwargs):
         super().__init__(master, fg_color="transparent", **kwargs)
         self._index_label = ctk.CTkLabel(self, text=str(index + 1), width=self.WIDTHS[0],
@@ -63,25 +89,99 @@ class StepRow(ctk.CTkFrame):
         self._index_label.grid(row=0, column=0, padx=1)
 
         self._entries: list[ctk.CTkEntry] = []
-        defaults = ["12.0", "1.0", "2.0", "10.0"]
+        # Default current is "MAX" so it auto-fills from the PSU profile
+        defaults = ["12.0", "MAX", "2.0", "10.0"]
         for col, (w, val) in enumerate(zip(self.WIDTHS[1:], defaults), start=1):
             e = ctk.CTkEntry(self, width=w, justify="center", font=("Consolas", 12))
             e.insert(0, val)
             e.grid(row=0, column=col, padx=1)
             self._entries.append(e)
 
+        self._setup_validation()
+
+    def _setup_validation(self):
+        self._entries[0].bind("<FocusOut>", self._on_voltage_focusout)
+        self._entries[1].bind("<FocusOut>", self._on_current_focusout)
+
+    def _on_voltage_focusout(self, _event=None):
+        e = self._entries[0]
+        try:
+            val = float(e.get())
+        except ValueError:
+            return
+        if val > StepRow._cls_max_voltage:
+            e.configure(border_color="#ff4444")
+            if StepRow._cls_warning_callback:
+                StepRow._cls_warning_callback(
+                    f"Voltage {val} V exceeds PSU max of {StepRow._cls_max_voltage} V")
+        else:
+            e.configure(border_color=["#979DA2", "#565B5E"])
+            if StepRow._cls_warning_callback:
+                StepRow._cls_warning_callback("")
+
+    def _on_current_focusout(self, _event=None):
+        e = self._entries[1]
+        raw = e.get().strip().upper()
+        if raw == "MAX":
+            e.configure(border_color=["#979DA2", "#565B5E"])
+            if StepRow._cls_warning_callback:
+                StepRow._cls_warning_callback("")
+            return
+        try:
+            val = float(raw)
+        except ValueError:
+            return
+        if val > StepRow._cls_max_current:
+            e.configure(border_color="#ff4444")
+            if StepRow._cls_warning_callback:
+                StepRow._cls_warning_callback(
+                    f"Current {val} A exceeds PSU max of {StepRow._cls_max_current} A")
+        else:
+            e.configure(border_color=["#979DA2", "#565B5E"])
+            if StepRow._cls_warning_callback:
+                StepRow._cls_warning_callback("")
+
+    def revalidate(self):
+        """Re-run border-colour validation after PSU limits change."""
+        self._on_voltage_focusout()
+        self._on_current_focusout()
+
     def set_index(self, n: int):
         self._index_label.configure(text=str(n + 1))
 
     def get_values(self) -> dict:
+        """Return step values as floats; 'MAX' current is resolved to the PSU max."""
         keys = ["voltage", "current", "ramp", "dwell"]
-        return {k: float(e.get()) for k, e in zip(keys, self._entries)}
+        result = {}
+        for k, e in zip(keys, self._entries):
+            raw = e.get().strip()
+            if k == "current" and raw.upper() == "MAX":
+                result[k] = StepRow._cls_max_current
+            else:
+                result[k] = float(raw)
+        return result
+
+    def get_raw_values(self) -> dict:
+        """Like get_values() but preserves 'MAX' as a string for profile saving."""
+        keys = ["voltage", "current", "ramp", "dwell"]
+        result = {}
+        for k, e in zip(keys, self._entries):
+            raw = e.get().strip()
+            if k == "current" and raw.upper() == "MAX":
+                result[k] = "MAX"
+            else:
+                result[k] = float(raw)
+        return result
 
     def set_values(self, d: dict):
         keys = ["voltage", "current", "ramp", "dwell"]
         for key, e in zip(keys, self._entries):
+            val = d.get(key, "0")
             e.delete(0, "end")
-            e.insert(0, str(d.get(key, "0")))
+            if key == "current" and str(val).upper() == "MAX":
+                e.insert(0, "MAX")
+            else:
+                e.insert(0, str(val))
 
     def highlight(self, active: bool):
         color = "#1a3a5c" if active else "transparent"
@@ -110,6 +210,11 @@ class App(ctk.CTk):
         self._plot_started = False
 
         self._build_ui()
+
+        # Load limits for the default-selected PSU and wire up the warning callback
+        self._load_psu_limits(self._psu_var.get())
+        StepRow.set_warning_callback(self._show_editor_warning)
+
         self._plot_refresh_loop()
 
     # -----------------------------------------------------------------------
@@ -136,7 +241,8 @@ class App(ctk.CTk):
         driver_names = list(self._driver_map.keys()) or ["(no drivers)"]
         self._psu_var = ctk.StringVar(value=driver_names[0])
         self._psu_combo = ctk.CTkComboBox(bar, values=driver_names,
-                                           variable=self._psu_var, width=220)
+                                           variable=self._psu_var, width=220,
+                                           command=self._on_psu_changed)
         self._psu_combo.pack(side="left", padx=4)
 
         ctk.CTkLabel(bar, text="COM:").pack(side="left", padx=(16, 4))
@@ -157,6 +263,12 @@ class App(ctk.CTk):
         self._status_label = ctk.CTkLabel(bar, text="Disconnected",
                                            text_color="#ff5555")
         self._status_label.pack(side="left", padx=8)
+
+        # PSU limits display — updated whenever the PSU combo changes
+        self._psu_limits_label = ctk.CTkLabel(bar, text="",
+                                               text_color="#888888",
+                                               font=("Consolas", 11))
+        self._psu_limits_label.pack(side="left", padx=(16, 4))
 
         self._mode = "cv"  # always CVHS — controlled by UI ramp logic
 
@@ -186,12 +298,12 @@ class App(ctk.CTk):
         # Add two default steps
         self._add_step()
         self._add_step()
-        self._step_rows[1].set_values({"voltage": 0.0, "current": 0.0,
+        self._step_rows[1].set_values({"voltage": 0.0, "current": "MAX",
                                         "ramp": 1.0, "dwell": 5.0})
 
         # Buttons
         btn_bar = ctk.CTkFrame(frame, fg_color="transparent")
-        btn_bar.grid(row=3, column=0, sticky="w", padx=4, pady=(0, 6))
+        btn_bar.grid(row=3, column=0, sticky="w", padx=4, pady=(0, 2))
         ctk.CTkButton(btn_bar, text="+ Add", width=70,
                       command=self._add_step).pack(side="left", padx=2)
         ctk.CTkButton(btn_bar, text="Remove", width=70,
@@ -200,6 +312,13 @@ class App(ctk.CTk):
                       command=self._move_up).pack(side="left", padx=2)
         ctk.CTkButton(btn_bar, text="↓", width=36,
                       command=self._move_down).pack(side="left", padx=2)
+
+        # Validation warning label
+        self._editor_warning_label = ctk.CTkLabel(
+            frame, text="", text_color="#ff4444",
+            font=("Consolas", 11), anchor="w")
+        self._editor_warning_label.grid(row=4, column=0, sticky="ew",
+                                         padx=8, pady=(0, 4))
 
     # --- Live monitor ---
     def _build_monitor(self):
@@ -311,6 +430,28 @@ class App(ctk.CTk):
             hover_color=active_h if mode == "full" else inactive_h)
 
     # -----------------------------------------------------------------------
+    # PSU selection / limits
+    # -----------------------------------------------------------------------
+
+    def _on_psu_changed(self, value: str):
+        self._load_psu_limits(value)
+        # Re-validate all existing step entries against the new limits
+        for row in self._step_rows:
+            row.revalidate()
+
+    def _load_psu_limits(self, psu_name: str):
+        path = self._driver_map.get(psu_name)
+        if path:
+            max_v, max_i = _read_psu_limits(path)
+        else:
+            max_v, max_i = 9999.0, 9999.0
+        StepRow.set_psu_limits(max_v, max_i)
+        # Update toolbar label
+        v_str = f"{max_v:.1f}" if max_v < 9999 else "—"
+        i_str = f"{max_i:.1f}" if max_i < 9999 else "—"
+        self._psu_limits_label.configure(text=f"Max: {v_str} V / {i_str} A")
+
+    # -----------------------------------------------------------------------
     # Connection
     # -----------------------------------------------------------------------
 
@@ -366,9 +507,6 @@ class App(ctk.CTk):
         row.destroy()
 
     def _move_up(self):
-        # Get currently focused row index (simple: last focused via selection)
-        # Swap values of last two visible rows as a simplification
-        # For a proper implementation track selection; here swap last two
         if len(self._step_rows) < 2:
             return
         self._swap_step_values(-2, -1)
@@ -379,15 +517,18 @@ class App(ctk.CTk):
         self._swap_step_values(-1, -2)
 
     def _swap_step_values(self, a: int, b: int):
-        va = self._step_rows[a].get_values()
-        vb = self._step_rows[b].get_values()
+        va = self._step_rows[a].get_raw_values()
+        vb = self._step_rows[b].get_raw_values()
         self._step_rows[a].set_values(vb)
         self._step_rows[b].set_values(va)
 
+    def _show_editor_warning(self, msg: str):
+        self._editor_warning_label.configure(text=msg)
+
     def _get_steps(self) -> list[dict] | None:
         steps = []
-        max_v = self._driver.max_voltage if self._driver else 9999
-        max_i = self._driver.max_current if self._driver else 9999
+        max_v = StepRow._cls_max_voltage
+        max_i = StepRow._cls_max_current
         for idx, row in enumerate(self._step_rows):
             try:
                 s = row.get_values()
@@ -396,11 +537,13 @@ class App(ctk.CTk):
                 return None
             if s["voltage"] > max_v:
                 messagebox.showerror("Out of range",
-                                     f"Step {idx+1}: voltage {s['voltage']} exceeds max {max_v} V")
+                                     f"Step {idx+1}: voltage {s['voltage']} V exceeds "
+                                     f"PSU max of {max_v} V")
                 return None
             if s["current"] > max_i:
                 messagebox.showerror("Out of range",
-                                     f"Step {idx+1}: current {s['current']} exceeds max {max_i} A")
+                                     f"Step {idx+1}: current {s['current']} A exceeds "
+                                     f"PSU max of {max_i} A")
                 return None
             steps.append(s)
         return steps
@@ -506,7 +649,6 @@ class App(ctk.CTk):
 
     def _update_dwell(self, remaining: float):
         current_text = self._progress_label.cget("text")
-        # Replace only the dwell part
         parts = current_text.split("Dwell: ")
         if len(parts) == 2:
             self._progress_label.configure(
@@ -528,7 +670,6 @@ class App(ctk.CTk):
 
     def _plot_refresh_loop(self):
         with self._measure_lock:
-            # read both values atomically — avoids race with _cb_dwell
             sample = self._pending_measure if self._plot_started else None
             self._pending_measure = None
 
@@ -566,9 +707,21 @@ class App(ctk.CTk):
             messagebox.showerror("Export Error", str(exc))
 
     def _save_profile(self):
-        steps = self._get_steps()
-        if steps is None:
+        steps = []
+        for idx, row in enumerate(self._step_rows):
+            try:
+                s = row.get_raw_values()
+            except ValueError as exc:
+                messagebox.showerror("Invalid input", f"Step {idx + 1}: {exc}")
+                return
+            steps.append(s)
+
+        try:
+            loops = int(self._loops_entry.get())
+        except ValueError:
+            messagebox.showerror("Error", "Invalid loop count.")
             return
+
         path = filedialog.asksaveasfilename(
             defaultextension=".json",
             filetypes=[("JSON profiles", "*.json"), ("All files", "*.*")],
@@ -577,8 +730,9 @@ class App(ctk.CTk):
         if not path:
             return
         try:
+            profile = {"loops": loops, "steps": steps}
             with open(path, "w") as f:
-                json.dump(steps, f, indent=2)
+                json.dump(profile, f, indent=2)
         except Exception as exc:
             messagebox.showerror("Save Error", str(exc))
 
@@ -591,13 +745,27 @@ class App(ctk.CTk):
             return
         try:
             with open(path) as f:
-                steps = json.load(f)
+                data = json.load(f)
+
+            # Support both old format (bare list) and new format (dict with loops/steps)
+            if isinstance(data, list):
+                steps = data
+                loops = 1
+            else:
+                steps = data.get("steps", [])
+                loops = data.get("loops", 1)
+
             # Rebuild step rows
             while self._step_rows:
                 self._step_rows.pop().destroy()
             for step in steps:
                 self._add_step()
                 self._step_rows[-1].set_values(step)
+
+            # Restore loop count
+            self._loops_entry.delete(0, "end")
+            self._loops_entry.insert(0, str(loops))
+
         except Exception as exc:
             messagebox.showerror("Load Error", str(exc))
 
