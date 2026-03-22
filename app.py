@@ -363,27 +363,26 @@ class App(ctk.CTk):
 
     # --- Controls bar ---
     def _build_controls(self):
-        bar = ctk.CTkFrame(self, height=70, corner_radius=0)
+        bar = ctk.CTkFrame(self, height=52, corner_radius=0)
         bar.grid(row=2, column=0, columnspan=2, sticky="ew")
 
-        # Left side: loops + progress
+        # Left side: loops group + progress labels all on one horizontal line
         left = ctk.CTkFrame(bar, fg_color="transparent")
         left.pack(side="left", padx=12, pady=8)
 
-        ctk.CTkLabel(left, text="Loops:").grid(row=0, column=0, padx=4)
-        self._loops_entry = ctk.CTkEntry(left, width=60, justify="center")
+        ctk.CTkLabel(left, text="Loops:").pack(side="left", padx=(0, 3))
+        self._loops_entry = ctk.CTkEntry(left, width=52, justify="center")
         self._loops_entry.insert(0, "1")
-        self._loops_entry.grid(row=0, column=1, padx=4)
-        ctk.CTkLabel(left, text="(0 = ∞)").grid(row=0, column=2, padx=2)
+        self._loops_entry.pack(side="left")
+        ctk.CTkLabel(left, text="(0=∞)", text_color="#888888",
+                     font=("", 11)).pack(side="left", padx=(3, 16))
 
-        # Three fixed-width labels so the layout never shifts when text changes
-        prog = ctk.CTkFrame(left, fg_color="transparent")
-        prog.grid(row=1, column=0, columnspan=4, sticky="w", pady=(4, 0))
-        self._step_label  = ctk.CTkLabel(prog, text="Step: –/–",  width=110,
+        # Three fixed-width labels — locked widths prevent any shifting
+        self._step_label  = ctk.CTkLabel(left, text="Step: –/–",  width=110,
                                           anchor="w", font=("Consolas", 12))
-        self._loop_label  = ctk.CTkLabel(prog, text="Loop: –/–",  width=130,
+        self._loop_label  = ctk.CTkLabel(left, text="Loop: –/–",  width=130,
                                           anchor="w", font=("Consolas", 12))
-        self._dwell_label = ctk.CTkLabel(prog, text="Dwell: –",   width=160,
+        self._dwell_label = ctk.CTkLabel(left, text="Dwell: –",   width=160,
                                           anchor="w", font=("Consolas", 12))
         self._step_label.pack(side="left")
         self._loop_label.pack(side="left")
