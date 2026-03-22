@@ -30,11 +30,14 @@ class PSUDriver:
     def connect(self, port: str) -> None:
         """Open a pyvisa-py serial connection on *port* (e.g. 'COM3')."""
         self._rm = pyvisa.ResourceManager("@py")
-        resource_str = f"ASRL{port}::INSTR"
+        # pyvisa-py expects ASRL4::INSTR not ASRLCOM4::INSTR
+        port_num = port.upper().replace("COM", "")
+        resource_str = f"ASRL{port_num}::INSTR"
         self._inst = self._rm.open_resource(resource_str)
         self._inst.read_termination = self._term
         self._inst.write_termination = self._term
         self._inst.timeout = 3000  # ms
+        self.set_mode("cv")  # default to CV on connect
 
     def disconnect(self) -> None:
         try:
@@ -71,6 +74,12 @@ class PSUDriver:
         if self._inst is None:
             raise RuntimeError("Not connected to PSU.")
         return self._inst.query(cmd).strip()
+
+    def set_mode(self, mode: str) -> None:
+        """Set operating mode. mode = 'cv' or 'cc'. Silently ignored if driver lacks the command."""
+        cmd = self._cmds.get(f"mode_{mode.lower()}")
+        if cmd:
+            self._write(cmd)
 
     def set_voltage(self, volts: float) -> None:
         if volts < 0 or volts > self.max_voltage:

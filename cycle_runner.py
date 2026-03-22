@@ -132,6 +132,10 @@ class CycleRunner:
 
                     prev_voltage = target_v
 
+                    # --- Settle pause — let PSU physically reach target voltage ---
+                    if not self._sleep(0.5):
+                        return
+
                     # --- Dwell ---
                     dwell_end = time.monotonic() + dwell_t
                     measure_interval = 0.4  # ~2.5 Hz

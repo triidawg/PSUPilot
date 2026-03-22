@@ -53,20 +53,20 @@ def _list_com_ports() -> list[str]:
 
 class StepRow(ctk.CTkFrame):
     COLS = ["#", "Voltage (V)", "Current (A)", "Ramp (s)", "Dwell (s)"]
-    WIDTHS = [28, 72, 72, 62, 62]
+    WIDTHS = [24, 62, 62, 54, 54]
 
     def __init__(self, master, index: int, **kwargs):
         super().__init__(master, fg_color="transparent", **kwargs)
         self._index_label = ctk.CTkLabel(self, text=str(index + 1), width=self.WIDTHS[0],
                                           anchor="center", font=("Consolas", 12))
-        self._index_label.grid(row=0, column=0, padx=2)
+        self._index_label.grid(row=0, column=0, padx=1)
 
         self._entries: list[ctk.CTkEntry] = []
         defaults = ["12.0", "1.0", "2.0", "10.0"]
         for col, (w, val) in enumerate(zip(self.WIDTHS[1:], defaults), start=1):
             e = ctk.CTkEntry(self, width=w, justify="center", font=("Consolas", 12))
             e.insert(0, val)
-            e.grid(row=0, column=col, padx=2)
+            e.grid(row=0, column=col, padx=1)
             self._entries.append(e)
 
     def set_index(self, n: int):
@@ -94,8 +94,8 @@ class StepRow(ctk.CTkFrame):
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("PSW Controller")
-        self.geometry("1060x680")
+        self.title("PSUPilot")
+        self.geometry("1200x720")
         self.minsize(900, 600)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -106,6 +106,7 @@ class App(ctk.CTk):
         # Pending measurement from runner thread
         self._pending_measure: tuple[float, float] | None = None
         self._measure_lock = threading.Lock()
+        self._plot_started = False
 
         self._build_ui()
         self._plot_refresh_loop()
@@ -156,6 +157,8 @@ class App(ctk.CTk):
                                            text_color="#ff5555")
         self._status_label.pack(side="left", padx=8)
 
+        self._mode = "cv"  # always CVHS — controlled by UI ramp logic
+
     # --- Cycle editor ---
     def _build_editor(self):
         frame = ctk.CTkFrame(self)
@@ -171,10 +174,10 @@ class App(ctk.CTk):
         for col, (label, w) in enumerate(zip(StepRow.COLS, StepRow.WIDTHS)):
             ctk.CTkLabel(hdr, text=label, width=w, anchor="center",
                          font=("", 11, "bold"), text_color="#888888").grid(
-                row=0, column=col, padx=2)
+                row=0, column=col, padx=1)
 
         # Scrollable step list
-        self._step_scroll = ctk.CTkScrollableFrame(frame, width=310, height=320)
+        self._step_scroll = ctk.CTkScrollableFrame(frame, width=290, height=320)
         self._step_scroll.grid(row=2, column=0, sticky="nsew", padx=4, pady=4)
         frame.grid_rowconfigure(2, weight=1)
 
@@ -204,8 +207,21 @@ class App(ctk.CTk):
         frame.grid_rowconfigure(1, weight=1)
         frame.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(frame, text="LIVE MONITOR", font=("", 13, "bold")).grid(
-            row=0, column=0, sticky="w", padx=8, pady=(6, 2))
+        hdr = ctk.CTkFrame(frame, fg_color="transparent")
+        hdr.grid(row=0, column=0, sticky="ew", padx=8, pady=(6, 2))
+        hdr.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(hdr, text="LIVE MONITOR", font=("", 13, "bold")).grid(
+            row=0, column=0, sticky="w")
+
+        self._sweep_btn = ctk.CTkButton(hdr, text="Sweep", width=65,
+                                         fg_color="#1a5c8a", hover_color="#1e6fa8",
+                                         command=lambda: self._set_graph_mode("sweep"))
+        self._sweep_btn.grid(row=0, column=1, padx=(4, 2))
+        self._full_btn = ctk.CTkButton(hdr, text="Full", width=65,
+                                        fg_color="#333333", hover_color="#444444",
+                                        command=lambda: self._set_graph_mode("full"))
+        self._full_btn.grid(row=0, column=2, padx=(2, 0))
 
         self._plot = LivePlot(frame)
         self._plot.grid(row=1, column=0, sticky="nsew", padx=0, pady=2)
@@ -276,6 +292,19 @@ class App(ctk.CTk):
         ports = _list_com_ports()
         self._port_combo.configure(values=ports)
         self._port_var.set(ports[0])
+
+    def _set_graph_mode(self, mode: str):
+        self._plot.set_mode(mode)
+        active   = "#1a5c8a"
+        inactive = "#333333"
+        active_h   = "#1e6fa8"
+        inactive_h = "#444444"
+        self._sweep_btn.configure(
+            fg_color=active   if mode == "sweep" else inactive,
+            hover_color=active_h if mode == "sweep" else inactive_h)
+        self._full_btn.configure(
+            fg_color=active   if mode == "full" else inactive,
+            hover_color=active_h if mode == "full" else inactive_h)
 
     # -----------------------------------------------------------------------
     # Connection
@@ -389,7 +418,9 @@ class App(ctk.CTk):
             messagebox.showerror("Error", "Invalid loop count.")
             return
 
-        self._plot.reset()
+        self._driver.set_mode(self._mode)  # re-apply selected mode before run
+        self._plot.reset()       # clear previous run data
+        self._plot_started = False  # block samples until first dwell begins
         self._set_run_state(True)
         self._total_steps = len(steps)
         self._total_loops = loops
@@ -437,6 +468,10 @@ class App(ctk.CTk):
         self.after(0, lambda: self._highlight_step(step_idx))
 
     def _cb_dwell(self, remaining: float):
+        if not self._plot_started:
+            with self._measure_lock:
+                self._pending_measure = None   # discard ramp samples
+                self._plot_started = True      # set inside lock — atomic with the flush
         self.after(0, lambda r=remaining: self._update_dwell(r))
 
     def _cb_measure(self, v: float, i: float):
@@ -489,7 +524,8 @@ class App(ctk.CTk):
 
     def _plot_refresh_loop(self):
         with self._measure_lock:
-            sample = self._pending_measure
+            # read both values atomically — avoids race with _cb_dwell
+            sample = self._pending_measure if self._plot_started else None
             self._pending_measure = None
 
         if sample is not None:
