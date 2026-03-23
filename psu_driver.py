@@ -20,6 +20,8 @@ class PSUDriver:
         self._cmds = self._cfg["commands"]
         self._term = self._cfg.get("termination", "\n")
 
+        self._idn_model: str | None = self._cfg.get("idn_model")
+
         self._rm: pyvisa.ResourceManager | None = None
         self._inst = None
 
@@ -74,6 +76,28 @@ class PSUDriver:
         if self._inst is None:
             raise RuntimeError("Not connected to PSU.")
         return self._inst.query(cmd).strip()
+
+    def query_idn(self) -> str:
+        """Send *IDN? and return the raw response string."""
+        return self._query("*IDN?")
+
+    def verify_idn(self) -> tuple[bool, str]:
+        """Query *IDN? and check the model field against the driver's idn_model.
+
+        Returns (match: bool, idn_response: str).
+        If the driver has no idn_model set, returns (True, response) — check skipped.
+        """
+        if not self._idn_model:
+            return True, ""
+        try:
+            response = self.query_idn()
+        except Exception as exc:
+            return False, f"(query failed: {exc})"
+        # Response format: GW-INSTEK,PSW160-7.2,TW123456,01.00.20110101
+        parts = [p.strip() for p in response.split(",")]
+        actual_model = parts[1] if len(parts) >= 2 else response
+        match = actual_model.upper() == self._idn_model.upper()
+        return match, response
 
     def set_mode(self, mode: str) -> None:
         """Set operating mode. mode = 'cv' or 'cc'. Silently ignored if driver lacks the command."""

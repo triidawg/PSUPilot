@@ -32,8 +32,11 @@ else:
 
 PROFILES_DIR = os.path.join(_DATA_DIR, "profiles")
 DRIVERS_DIR = os.path.join(_RESOURCE_DIR, "drivers")
+# User-added drivers live next to the exe/script so they survive rebuilds.
+USER_DRIVERS_DIR = os.path.join(_DATA_DIR, "drivers")
 
 os.makedirs(PROFILES_DIR, exist_ok=True)
+os.makedirs(USER_DRIVERS_DIR, exist_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -41,15 +44,23 @@ os.makedirs(PROFILES_DIR, exist_ok=True)
 # ---------------------------------------------------------------------------
 
 def _load_driver_names() -> dict[str, str]:
-    """Returns {model_code: path} — e.g. {'PSW160-7.2': '/path/PSW160-7.2.json'}"""
+    """Returns {model_code: path} — e.g. {'PSW160-7.2': '/path/PSW160-7.2.json'}
+    Bundled drivers are loaded first; user drivers next to the exe override them."""
     result = {}
-    for path in glob.glob(os.path.join(DRIVERS_DIR, "*.json")):
-        try:
-            with open(path) as f:
-                d = json.load(f)
-            result[d["model"]] = path
-        except Exception:
-            pass
+    search_dirs = [DRIVERS_DIR, USER_DRIVERS_DIR]
+    # Deduplicate in case both point to the same folder (dev mode)
+    seen = set()
+    for d in search_dirs:
+        if d in seen:
+            continue
+        seen.add(d)
+        for path in glob.glob(os.path.join(d, "*.json")):
+            try:
+                with open(path) as f:
+                    data = json.load(f)
+                result[data["model"]] = path
+            except Exception:
+                pass
     return result
 
 
@@ -529,6 +540,16 @@ class App(ctk.CTk):
                 text=f"{self._driver.full_name}  |  {port}",
                 text_color="#55ff55")
             self._connect_btn.configure(text="Disconnect")
+            # Identity check
+            match, idn = self._driver.verify_idn()
+            if not match:
+                messagebox.showwarning(
+                    "PSU Mismatch",
+                    f"Selected driver: {self._driver.model}\n"
+                    f"PSU responded:   {idn}\n\n"
+                    "The connected PSU does not match the selected driver.\n"
+                    "Proceeding anyway — verify your selection before running tests."
+                )
         except Exception as exc:
             self._driver = None
             messagebox.showerror("Connection Error", str(exc))

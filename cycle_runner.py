@@ -91,6 +91,10 @@ class CycleRunner:
 
     def _run(self):
         try:
+            # Always start from a safe state regardless of what the PSU was
+            # left at by a previous run.
+            self._psu.set_voltage(0.0)
+            self._psu.set_current(0.0)
             self._psu.output_on()
             loop = 0
             while True:

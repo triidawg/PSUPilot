@@ -1,10 +1,10 @@
 {
-  "model": "PSW160-7.2",
-  "idn_model": "PSW160-7.2",
+  "model": "PSW160-21.6",
+  "idn_model": "PSW160-21.6",
   "brand": "GW Instek",
-  "full_name": "GW Instek PSW160-7.2 Programmable DC Power Supply",
+  "full_name": "GW Instek PSW160-21.6 Programmable DC Power Supply",
   "max_voltage": 160.0,
-  "max_current": 7.2,
+  "max_current": 21.6,
   "connection": "USB",
   "termination": "\n",
   "commands": {
