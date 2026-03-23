@@ -540,15 +540,18 @@ class App(ctk.CTk):
                 text=f"{self._driver.full_name}  |  {port}",
                 text_color="#55ff55")
             self._connect_btn.configure(text="Disconnect")
-            # Identity check
+            # Identity check — abort if PSU doesn't match the selected driver
             match, idn = self._driver.verify_idn()
             if not match:
-                messagebox.showwarning(
+                self._driver.disconnect()
+                self._driver = None
+                self._status_label.configure(text="Disconnected", text_color="#ff5555")
+                self._connect_btn.configure(text="Connect")
+                messagebox.showerror(
                     "PSU Mismatch",
-                    f"Selected driver: {self._driver.model}\n"
+                    f"Selected driver: {driver_name}\n"
                     f"PSU responded:   {idn}\n\n"
-                    "The connected PSU does not match the selected driver.\n"
-                    "Proceeding anyway — verify your selection before running tests."
+                    "Connection refused — select the correct driver and try again."
                 )
         except Exception as exc:
             self._driver = None
