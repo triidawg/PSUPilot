@@ -540,6 +540,7 @@ class App(ctk.CTk):
                 text=f"{self._driver.full_name}  |  {port}",
                 text_color="#55ff55")
             self._connect_btn.configure(text="Disconnect")
+            self._psu_combo.configure(state="disabled")
             # Identity check — abort if PSU doesn't match the selected driver
             match, idn = self._driver.verify_idn()
             if not match:
@@ -547,6 +548,7 @@ class App(ctk.CTk):
                 self._driver = None
                 self._status_label.configure(text="Disconnected", text_color="#ff5555")
                 self._connect_btn.configure(text="Connect")
+                self._psu_combo.configure(state="normal")
                 messagebox.showerror(
                     "PSU Mismatch",
                     f"Selected driver: {driver_name}\n"
@@ -555,6 +557,7 @@ class App(ctk.CTk):
                 )
         except Exception as exc:
             self._driver = None
+            self._psu_combo.configure(state="normal")
             messagebox.showerror("Connection Error", str(exc))
 
     def _disconnect(self):
@@ -565,6 +568,7 @@ class App(ctk.CTk):
             self._driver = None
         self._status_label.configure(text="Disconnected", text_color="#ff5555")
         self._connect_btn.configure(text="Connect")
+        self._psu_combo.configure(state="normal")
 
     # -----------------------------------------------------------------------
     # Step editor operations
