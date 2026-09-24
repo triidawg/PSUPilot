@@ -3,11 +3,14 @@ cycle_runner.py — Step sequencer, software ramp logic, and loop control.
 Runs entirely in a background thread so the UI stays responsive.
 """
 
+import math
 import threading
 import time
 from typing import Callable
 
-RAMP_STEPS = 50  # number of sub-steps per ramp
+RAMP_STEP_VOLTS = 0.5   # target volts per ramp sub-step
+MAX_STEP_DELAY = 0.4    # seconds — voltage must advance at least this often, regardless of delta_v
+MIN_STEP_DELAY = 0.02   # seconds — floor so short/large ramps don't flood the serial link
 
 
 class CycleRunner:
@@ -117,20 +120,34 @@ class CycleRunner:
 
                     # --- Ramp voltage ---
                     if ramp_t > 0:
-                        n = RAMP_STEPS
+                        delta_v = abs(target_v - prev_voltage)
+                        n_by_volts = round(delta_v / RAMP_STEP_VOLTS)
+                        n_by_time = math.ceil(ramp_t / MAX_STEP_DELAY)
+                        n = max(1, n_by_volts, n_by_time)
+                        n = min(n, max(1, int(ramp_t / MIN_STEP_DELAY)))  # don't flood the serial link
                         step_v = (target_v - prev_voltage) / n
                         step_delay = ramp_t / n
+                        measure_interval = min(0.4, step_delay)  # ~2.5 Hz cap, matches dwell
+                        next_measure = time.monotonic()
                         for i in range(1, n + 1):
                             if self._stop_event.is_set():
                                 return
                             self._pause_event.wait()
-                            v = prev_voltage + step_v * i
+                            v = target_v if i == n else prev_voltage + step_v * i
                             self._psu.set_voltage(v)
-                            if not self._sleep(step_delay):
-                                return
-                            # measure during ramp at reduced rate
-                            if i % 10 == 0:
-                                self._measure()
+                            step_end = time.monotonic() + step_delay
+                            while True:
+                                if self._stop_event.is_set():
+                                    return
+                                self._pause_event.wait()
+                                now = time.monotonic()
+                                if now >= next_measure:
+                                    self._measure()
+                                    next_measure = now + measure_interval
+                                remaining = step_end - time.monotonic()
+                                if remaining <= 0:
+                                    break
+                                time.sleep(min(0.05, remaining))
                     else:
                         self._psu.set_voltage(target_v)
 
