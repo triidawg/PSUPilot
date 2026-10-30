@@ -11,7 +11,8 @@ A Windows desktop application for programming and monitoring the **GW Instek PSW
 - **Cycle Editor** — table-based step editor with voltage, current limit, ramp time, and dwell time per step
 - **Software Ramping** — smooth voltage ramps simulated in software (~50 sub-steps), since the PSW160 has no native ramp command
 - **Loop Control** — repeat sequences 1–∞ times with a live loop counter
-- **Continuous Mode** — hold one voltage until Stop, logging to a CSV in `logs/`, with voltage and current limit adjustable during the run
+- **Continuous Mode** — hold one voltage until Stop, with voltage and current limit adjustable during the run and a selectable voltage range (0–32 VDC by default) to guard against mistyped values
+- **Automatic Log** — every run saves measured and set values to `logs/last_run.csv`, overwritten by the next run (use Export CSV to keep a run)
 - **Live Monitor** — real-time voltage and current plot (matplotlib, ~2.5 Hz), plus large numeric readouts
 - **Run Controls** — Run / Stop with per-step progress and dwell countdown
 - **Save / Load Profiles** — cycle steps saved as human-readable `.json` files

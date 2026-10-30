@@ -16,6 +16,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 WINDOW_SECONDS = 60
 MAX_PLOT_POINTS = 2000  # drawn points only — the full buffer is kept for CSV export
+MAX_SAMPLES = 1_512_000  # about a week at 2.5 Hz; older samples drop off, the log file keeps them
 
 
 class LivePlot(tk.Frame):
@@ -24,9 +25,11 @@ class LivePlot(tk.Frame):
         super().__init__(master, **kwargs)
 
         self._t0 = time.monotonic()
-        self._times: deque[float] = deque()
-        self._voltages: deque[float] = deque()
-        self._currents: deque[float] = deque()
+        self._times: deque[float] = deque(maxlen=MAX_SAMPLES)
+        self._voltages: deque[float] = deque(maxlen=MAX_SAMPLES)
+        self._currents: deque[float] = deque(maxlen=MAX_SAMPLES)
+        self._set_voltages: deque[float] = deque(maxlen=MAX_SAMPLES)
+        self._set_currents: deque[float] = deque(maxlen=MAX_SAMPLES)
         self._mode = "full"  # 'sweep' | 'full'
 
         # ---- Matplotlib figure ----
@@ -62,11 +65,14 @@ class LivePlot(tk.Frame):
         """Set display mode: 'sweep' or 'full'."""
         self._mode = mode
 
-    def get_data(self) -> tuple[list[float], list[float], list[float]]:
-        """Return (times, voltages, currents) lists — full buffer regardless of display mode."""
-        return list(self._times), list(self._voltages), list(self._currents)
+    def get_data(self) -> tuple[list[float], list[float], list[float], list[float], list[float]]:
+        """Return (times, voltages, currents, set_voltages, set_currents) lists —
+        full buffer regardless of display mode."""
+        return (list(self._times), list(self._voltages), list(self._currents),
+                list(self._set_voltages), list(self._set_currents))
 
-    def add_sample(self, timestamp: float, voltage: float, current: float) -> float:
+    def add_sample(self, timestamp: float, voltage: float, current: float,
+                   set_voltage: float, set_current: float) -> float:
         """Store a sample taken at `timestamp` (time.monotonic). Returns seconds since t=0."""
         if not self._times:
             self._t0 = timestamp  # anchor t=0 to first real data point
@@ -74,6 +80,8 @@ class LivePlot(tk.Frame):
         self._times.append(t)
         self._voltages.append(voltage)
         self._currents.append(current)
+        self._set_voltages.append(set_voltage)
+        self._set_currents.append(set_current)
         return t
 
     def refresh(self):
@@ -90,7 +98,7 @@ class LivePlot(tk.Frame):
             idx = next((i for i, t in enumerate(ts) if t >= cutoff), 0)
             ts, vs, cs = ts[idx:], vs[idx:], cs[idx:]
         else:
-            t_min = 0.0
+            t_min = ts[0]  # 0 until a very long run starts dropping old samples
 
         stride = max(1, len(ts) // MAX_PLOT_POINTS)
         self._line_v.set_data(ts[::stride], vs[::stride])
@@ -110,12 +118,13 @@ class LivePlot(tk.Frame):
 
         self._mpl_canvas.draw_idle()
 
-    def reset(self, max_samples: int | None = None):
-        """Clear all data. max_samples limits the buffer; older samples are then dropped."""
+    def reset(self):
         self._t0 = time.monotonic()
-        self._times = deque(maxlen=max_samples)
-        self._voltages = deque(maxlen=max_samples)
-        self._currents = deque(maxlen=max_samples)
+        self._times.clear()
+        self._voltages.clear()
+        self._currents.clear()
+        self._set_voltages.clear()
+        self._set_currents.clear()
         self._line_v.set_data([], [])
         self._line_i.set_data([], [])
         self._mpl_canvas.draw_idle()

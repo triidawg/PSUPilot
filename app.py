@@ -6,10 +6,10 @@ import csv
 import json
 import math
 import os
+import queue
 import sys
 import glob
 import threading
-import time
 import tkinter as tk
 from collections import deque
 from tkinter import filedialog, messagebox
@@ -35,6 +35,7 @@ else:
 
 PROFILES_DIR = os.path.join(_DATA_DIR, "profiles")
 LOGS_DIR = os.path.join(_DATA_DIR, "logs")
+LOG_FILE_NAME = "last_run.csv"  # overwritten by every run
 DRIVERS_DIR = os.path.join(_RESOURCE_DIR, "drivers")
 # User-added drivers live next to the exe/script so they survive rebuilds.
 USER_DRIVERS_DIR = os.path.join(_DATA_DIR, "drivers")
@@ -42,11 +43,14 @@ USER_DRIVERS_DIR = os.path.join(_DATA_DIR, "drivers")
 os.makedirs(PROFILES_DIR, exist_ok=True)
 os.makedirs(USER_DRIVERS_DIR, exist_ok=True)
 
-# Infinite runs log to a file; the plot keeps only about the last 22 hours at 2.5 Hz.
-INFINITE_RUN_MAX_SAMPLES = 200_000
+CSV_HEADER = ["Time (s)", "Voltage (V)", "Current (A)", "Set Voltage (V)", "Set Current (A)"]
 
 MODE_CYCLE = "Cycle Editor"
 MODE_CONTINUOUS = "Continuous"
+
+# Continuous mode voltage limits; None leaves only the PSU's own maximum
+VOLTAGE_RANGES = {"0–32 VDC": 32.0, "0–150 VDC": 150.0, "Unrestricted": None}
+DEFAULT_VOLTAGE_RANGE = "0–32 VDC"
 
 
 # ---------------------------------------------------------------------------
@@ -81,6 +85,10 @@ def _list_com_ports() -> list[str]:
 
 def _in_range(value: float, low: float, high: float) -> bool:
     return math.isfinite(value) and low <= value <= high
+
+
+def _csv_row(t: float, v: float, i: float, set_v: float, set_i: float) -> list[str]:
+    return [f"{t:.3f}", f"{v:.4f}", f"{i:.4f}", f"{set_v:.3f}", f"{set_i:.3f}"]
 
 
 def _read_psu_limits(path: str) -> tuple[float, float]:
@@ -276,14 +284,21 @@ class App(ctk.CTk):
         self._driver_map = _load_driver_names()
 
         # Pending measurement from runner thread
-        self._pending_samples: deque[tuple[float, float, float]] = deque()
+        self._pending_samples: deque[tuple[float, float, float, float, float]] = deque()
         self._measure_lock = threading.Lock()
         self._plot_started = False
+
+        # UI work requested by the runner thread. It must never wait for the window,
+        # or a busy window would delay voltage changes and stretch dips.
+        self._ui_events: queue.SimpleQueue = queue.SimpleQueue()
+
+        self._selected_row: StepRow | None = None
+        self._highlighted_row: StepRow | None = None
 
         self._run_mode = MODE_CYCLE
         self._running = False
         self._after_stop = None   # runs once the current run has fully ended
-        self._log_file = None     # CSV log for infinite runs
+        self._log_file = None     # CSV log of the current run
         self._log_writer = None
 
         self._build_ui()
@@ -295,6 +310,7 @@ class App(ctk.CTk):
         self._selected_idx: int = 0
 
         self._plot_refresh_loop()
+        self._ui_event_loop()
 
     # -----------------------------------------------------------------------
     # UI construction
@@ -417,35 +433,38 @@ class App(ctk.CTk):
         panel.grid_remove()  # Cycle Editor is shown first
         self._continuous_panel = panel
 
+        self._cont_range_selector = ctk.CTkSegmentedButton(panel, values=list(VOLTAGE_RANGES))
+        self._cont_range_selector.set(DEFAULT_VOLTAGE_RANGE)
+        self._cont_range_selector.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+
         ctk.CTkLabel(panel, text="Voltage (V)", width=90, anchor="w").grid(
-            row=0, column=0, sticky="w", pady=4)
+            row=1, column=0, sticky="w", pady=4)
         self._cont_voltage_entry = ctk.CTkEntry(panel, width=90, justify="center",
                                                 font=("Consolas", 12))
         self._cont_voltage_entry.insert(0, "24.0")
-        self._cont_voltage_entry.grid(row=0, column=1, sticky="w", pady=4)
+        self._cont_voltage_entry.grid(row=1, column=1, sticky="w", pady=4)
 
         ctk.CTkLabel(panel, text="Current (A)", width=90, anchor="w").grid(
-            row=1, column=0, sticky="w", pady=4)
+            row=2, column=0, sticky="w", pady=4)
         self._cont_current_entry = ctk.CTkEntry(panel, width=90, justify="center",
                                                 font=("Consolas", 12))
         self._cont_current_entry.insert(0, "MAX")
-        self._cont_current_entry.grid(row=1, column=1, sticky="w", pady=4)
+        self._cont_current_entry.grid(row=2, column=1, sticky="w", pady=4)
 
         self._cont_set_btn = ctk.CTkButton(panel, text="Set", width=90,
                                            command=self._apply_continuous, state="disabled")
-        self._cont_set_btn.grid(row=2, column=1, sticky="w", pady=4)
+        self._cont_set_btn.grid(row=3, column=1, sticky="w", pady=4)
         for entry in (self._cont_voltage_entry, self._cont_current_entry):
             entry.bind("<Return>", self._apply_continuous)
 
         self._cont_active_label = ctk.CTkLabel(panel, text="Output: off", anchor="w",
                                                font=("Consolas", 12))
-        self._cont_active_label.grid(row=3, column=0, columnspan=2, sticky="w", pady=(12, 2))
+        self._cont_active_label.grid(row=4, column=0, columnspan=2, sticky="w", pady=(12, 2))
 
-        ctk.CTkLabel(panel, text="Holds the voltage and logs to a CSV in the\n"
-                                 "logs folder until Stop. Press Set or Enter\n"
-                                 "to change the output during the run.",
+        ctk.CTkLabel(panel, text="Holds the voltage until Stop. Press Set or\n"
+                                 "Enter to change the output during the run.",
                      text_color="#888888", font=("", 11), justify="left", anchor="w").grid(
-            row=4, column=0, columnspan=2, sticky="w", pady=(2, 0))
+            row=5, column=0, columnspan=2, sticky="w", pady=(2, 0))
 
     def _set_run_mode(self, mode: str):
         self._run_mode = mode
@@ -748,8 +767,10 @@ class App(ctk.CTk):
 
     def _select_row(self, idx: int):
         self._selected_idx = idx
-        for i, row in enumerate(self._step_rows):
-            row.select(i == idx)
+        if self._selected_row in self._step_rows:
+            self._selected_row.select(False)
+        self._selected_row = self._step_rows[idx]
+        self._selected_row.select(True)
 
     def _show_editor_warning(self):
         msg = next((row.warning() for row in self._step_rows if row.warning()), "")
@@ -816,7 +837,7 @@ class App(ctk.CTk):
         loops = self._get_loops()
         if loops is None:
             return
-        if not self._prepare_run(infinite=loops == 0):
+        if not self._prepare_run():
             return
         self._total_steps = len(steps)
         self._total_loops = loops
@@ -836,7 +857,7 @@ class App(ctk.CTk):
 
     def _run_continuous(self):
         target = self._get_continuous_target()
-        if target is None or not self._prepare_run(infinite=True):
+        if target is None or not self._prepare_run():
             return
         voltage, current = target
         self._show_continuous_output(voltage, current)
@@ -850,19 +871,18 @@ class App(ctk.CTk):
         )
         self._runner.start()
 
-    def _prepare_run(self, infinite: bool) -> bool:
+    def _prepare_run(self) -> bool:
         try:
             self._driver.set_mode(self._mode)  # re-apply selected mode before run
         except Exception as exc:
             messagebox.showerror("PSU Error", str(exc))
             return False
 
-        self._plot.reset(INFINITE_RUN_MAX_SAMPLES if infinite else None)  # clear previous run data
+        self._plot.reset()       # clear previous run data
         self._plot_started = False  # block samples until first dwell begins
         with self._measure_lock:
             self._pending_samples.clear()
-        if infinite:
-            self._open_log()
+        self._open_log()
         self._set_run_state(True)
         return True
 
@@ -879,6 +899,12 @@ class App(ctk.CTk):
         if not _in_range(voltage, 0.0, max_v):
             messagebox.showerror("Out of range",
                                  f"Voltage {voltage} V is outside the PSU range of 0–{max_v} V")
+            return None
+        range_name = self._cont_range_selector.get()
+        limit = VOLTAGE_RANGES[range_name]
+        if limit is not None and voltage > limit:
+            messagebox.showerror("Out of range",
+                                 f"Voltage {voltage} V is above the selected {range_name} range.")
             return None
         if not _in_range(current, 0.0, max_i):
             messagebox.showerror("Out of range",
@@ -909,22 +935,23 @@ class App(ctk.CTk):
         self._stop_btn.configure(state="normal" if running else "disabled")
         self._cont_set_btn.configure(state="normal" if running else "disabled")
         self._mode_selector.configure(state="disabled" if running else "normal")
+        self._cont_range_selector.configure(state="disabled" if running else "normal")
 
     # -----------------------------------------------------------------------
-    # Runner callbacks (called from background thread → schedule via after)
+    # Runner callbacks (called from background thread → queued for the UI thread)
     # -----------------------------------------------------------------------
 
     def _cb_step(self, step_idx: int, loop_idx: int):
-        self.after(0, lambda: self._update_progress(step_idx, loop_idx, None))
-        self.after(0, lambda: self._highlight_step(step_idx))
+        self._ui_events.put(lambda: self._update_progress(step_idx, loop_idx, None))
+        self._ui_events.put(lambda: self._highlight_step(step_idx))
 
     def _cb_dwell(self, remaining: float):
         self._start_plot()
-        self.after(0, lambda r=remaining: self._update_dwell(r))
+        self._ui_events.put(lambda: self._update_dwell(remaining))
 
     def _cb_elapsed(self, elapsed: float):
         self._start_plot()
-        self.after(0, lambda e=elapsed: self._update_elapsed(e))
+        self._ui_events.put(lambda: self._update_elapsed(elapsed))
 
     def _start_plot(self):
         if not self._plot_started:
@@ -932,18 +959,27 @@ class App(ctk.CTk):
                 self._pending_samples.clear()  # discard ramp samples
                 self._plot_started = True      # set inside lock — atomic with the flush
 
-    def _cb_measure(self, t: float, v: float, i: float):
+    def _cb_measure(self, t: float, v: float, i: float, set_v: float, set_i: float):
         with self._measure_lock:
-            self._pending_samples.append((t, v, i))
+            self._pending_samples.append((t, v, i, set_v, set_i))
 
     def _cb_loop(self, loop_idx: int):
         pass  # progress updates already handled
 
     def _cb_done(self):
-        self.after(0, self._on_run_finished)
+        self._ui_events.put(self._on_run_finished)
 
     def _cb_error(self, msg: str):
-        self.after(0, lambda m=msg: messagebox.showerror("PSU Error", m))
+        self._ui_events.put(lambda: messagebox.showerror("PSU Error", msg))
+
+    def _ui_event_loop(self):
+        while True:
+            try:
+                event = self._ui_events.get_nowait()
+            except queue.Empty:
+                break
+            event()
+        self.after(50, self._ui_event_loop)
 
     # -----------------------------------------------------------------------
     # GUI updates from callbacks
@@ -965,9 +1001,12 @@ class App(ctk.CTk):
         hours, minutes = divmod(minutes, 60)
         self._dwell_label.configure(text=f"Time: {hours}:{minutes:02}:{seconds:02}")
 
-    def _highlight_step(self, active_idx: int):
-        for i, row in enumerate(self._step_rows):
-            row.highlight(i == active_idx)
+    def _highlight_step(self, active_idx: int | None):
+        if self._highlighted_row in self._step_rows:
+            self._highlighted_row.highlight(False)
+        self._highlighted_row = None if active_idx is None else self._step_rows[active_idx]
+        if self._highlighted_row:
+            self._highlighted_row.highlight(True)
 
     def _on_run_finished(self):
         self._runner = None
@@ -978,8 +1017,7 @@ class App(ctk.CTk):
         self._loop_label.configure(text="Loop: –/–")
         self._dwell_label.configure(text="Dwell: –")
         self._cont_active_label.configure(text="Output: off")
-        for row in self._step_rows:
-            row.highlight(False)
+        self._highlight_step(None)
         if self._after_stop:
             action, self._after_stop = self._after_stop, None
             action()
@@ -999,10 +1037,10 @@ class App(ctk.CTk):
 
         if not samples:
             return
-        for t, v, i in samples:
-            elapsed = self._plot.add_sample(t, v, i)
+        for t, v, i, set_v, set_i in samples:
+            elapsed = self._plot.add_sample(t, v, i, set_v, set_i)
             if self._log_writer:
-                self._log_writer.writerow([f"{elapsed:.3f}", f"{v:.4f}", f"{i:.4f}"])
+                self._log_writer.writerow(_csv_row(elapsed, v, i, set_v, set_i))
         if self._log_file:
             self._log_file.flush()
         self._v_label.configure(text=f"V:  {v:7.3f}  V")
@@ -1012,13 +1050,14 @@ class App(ctk.CTk):
     def _open_log(self):
         try:
             os.makedirs(LOGS_DIR, exist_ok=True)
-            path = os.path.join(LOGS_DIR, time.strftime("PSUPilot_%Y%m%d_%H%M%S.csv"))
-            self._log_file = open(path, "w", newline="")
+            self._log_file = open(os.path.join(LOGS_DIR, LOG_FILE_NAME), "w", newline="")
             self._log_writer = csv.writer(self._log_file)
-            self._log_writer.writerow(["Time (s)", "Voltage (V)", "Current (A)"])
+            self._log_writer.writerow(CSV_HEADER)
         except Exception as exc:
             self._close_log()
-            messagebox.showwarning("Log Error", f"Run will not be logged to a file:\n{exc}")
+            messagebox.showwarning("Log Error",
+                                   f"This run will not be saved to {LOG_FILE_NAME}. "
+                                   f"Is it open in another program?\n\n{exc}")
 
     def _close_log(self):
         if self._log_file:
@@ -1031,8 +1070,8 @@ class App(ctk.CTk):
     # -----------------------------------------------------------------------
 
     def _export_csv(self):
-        times, voltages, currents = self._plot.get_data()
-        if not times:
+        data = self._plot.get_data()
+        if not data[0]:
             messagebox.showinfo("Export CSV", "No data to export.")
             return
         path = filedialog.asksaveasfilename(
@@ -1044,9 +1083,9 @@ class App(ctk.CTk):
         try:
             with open(path, "w", newline="") as f:
                 writer = csv.writer(f)
-                writer.writerow(["Time (s)", "Voltage (V)", "Current (A)"])
-                for t, v, i in zip(times, voltages, currents):
-                    writer.writerow([f"{t:.3f}", f"{v:.4f}", f"{i:.4f}"])
+                writer.writerow(CSV_HEADER)
+                for row in zip(*data):
+                    writer.writerow(_csv_row(*row))
         except Exception as exc:
             messagebox.showerror("Export Error", str(exc))
 

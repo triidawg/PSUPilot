@@ -31,7 +31,7 @@ class CycleRunner:
     Callbacks (all called from the runner thread — schedule GUI updates via `after`):
         on_step(step_index, loop_index)
         on_dwell_tick(seconds_remaining)
-        on_measure(timestamp, voltage, current)
+        on_measure(timestamp, voltage, current, set_voltage, set_current)
         on_loop_complete(loop_index)
         on_done()
         on_error(message)
@@ -59,6 +59,8 @@ class CycleRunner:
 
         self._next_measure = 0.0
         self._measure_failures = 0
+        self._set_voltage = 0.0  # last values commanded, recorded with each measurement
+        self._set_current = 0.0
 
         self._thread: threading.Thread | None = None
 
@@ -130,7 +132,7 @@ class CycleRunner:
                 self._on_step(step_idx, loop)
 
                 # --- Set current limit first ---
-                self._psu.set_current(target_i)
+                self._command_current(target_i)
 
                 # --- Ramp voltage ---
                 if ramp_t > 0:
@@ -146,12 +148,12 @@ class CycleRunner:
                         if self._stop_event.is_set():
                             return
                         v = target_v if i == n else prev_voltage + step_v * i
-                        self._psu.set_voltage(v)
+                        self._command_voltage(v)
                         # Timed from the ramp's start so command delays don't add up
                         if not self._wait_until(ramp_start + step_delay * i):
                             return
                 else:
-                    self._psu.set_voltage(target_v)
+                    self._command_voltage(target_v)
 
                 prev_voltage = target_v
 
@@ -190,6 +192,14 @@ class CycleRunner:
                 pass
             self._on_done()
 
+    def _command_voltage(self, volts: float):
+        self._psu.set_voltage(volts)
+        self._set_voltage = volts
+
+    def _command_current(self, amps: float):
+        self._psu.set_current(amps)
+        self._set_current = amps
+
     def _settle(self, target_v: float) -> bool:
         """Wait for the measured voltage to reach target_v, up to SETTLE_TIMEOUT.
         Carries on after the timeout, as a load or current limit may hold it below
@@ -223,7 +233,7 @@ class CycleRunner:
                 raise RuntimeError(f"Lost connection to PSU: {exc}") from exc
             return None
         self._measure_failures = 0
-        self._on_measure(timestamp, v, i)
+        self._on_measure(timestamp, v, i, self._set_voltage, self._set_current)
         return v
 
 
@@ -251,8 +261,8 @@ class ContinuousRunner(CycleRunner):
     def _execute(self):
         if not self._start_output():
             return
-        self._psu.set_current(self._current)
-        self._psu.set_voltage(self._voltage)
+        self._command_current(self._current)
+        self._command_voltage(self._voltage)
         if not self._settle(self._voltage):
             return
 
@@ -262,8 +272,8 @@ class ContinuousRunner(CycleRunner):
                 target, self._pending_target = self._pending_target, None
             if target is not None:
                 voltage, current = target
-                self._psu.set_current(current)
-                self._psu.set_voltage(voltage)
+                self._command_current(current)
+                self._command_voltage(voltage)
             self._on_dwell_tick(time.monotonic() - started)
             self._measure_if_due()
             time.sleep(0.05)
