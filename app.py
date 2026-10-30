@@ -18,7 +18,7 @@ import customtkinter as ctk
 import serial.tools.list_ports
 
 from psu_driver import PSUDriver
-from cycle_runner import CycleRunner
+from cycle_runner import ContinuousRunner, CycleRunner
 from live_plot import LivePlot
 
 ctk.set_appearance_mode("dark")
@@ -44,6 +44,9 @@ os.makedirs(USER_DRIVERS_DIR, exist_ok=True)
 
 # Infinite runs log to a file; the plot keeps only about the last 22 hours at 2.5 Hz.
 INFINITE_RUN_MAX_SAMPLES = 200_000
+
+MODE_CYCLE = "Cycle Editor"
+MODE_CONTINUOUS = "Continuous"
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +142,7 @@ class StepRow(ctk.CTkFrame):
             e.insert(0, val)
             e.grid(row=0, column=col, padx=1)
             self._entries.append(e)
+        self._entry_text_color = self._entries[0].cget("text_color")
 
         self._setup_validation()
 
@@ -152,6 +156,11 @@ class StepRow(ctk.CTkFrame):
             self.configure(fg_color="transparent")
         else:
             self.configure(fg_color="#2a2a3a")
+
+    def set_locked(self, locked: bool):
+        for e in self._entries:
+            e.configure(state="disabled" if locked else "normal",
+                        text_color="#888888" if locked else self._entry_text_color)
 
     def _setup_validation(self):
         self._entries[0].bind("<FocusOut>", self._on_voltage_focusout)
@@ -271,6 +280,8 @@ class App(ctk.CTk):
         self._measure_lock = threading.Lock()
         self._plot_started = False
 
+        self._run_mode = MODE_CYCLE
+        self._running = False
         self._after_stop = None   # runs once the current run has fully ended
         self._log_file = None     # CSV log for infinite runs
         self._log_writer = None
@@ -344,13 +355,21 @@ class App(ctk.CTk):
     def _build_editor(self):
         frame = ctk.CTkFrame(self)
         frame.grid(row=1, column=0, sticky="nsew", padx=(8, 4), pady=8)
-        frame.grid_columnconfigure(0, weight=1)
+        frame.grid_columnconfigure(0, weight=1, minsize=320)  # keep width when panels swap
+        frame.grid_rowconfigure(1, weight=1)
 
-        ctk.CTkLabel(frame, text="CYCLE EDITOR", font=("", 13, "bold")).grid(
-            row=0, column=0, sticky="w", padx=8, pady=(6, 2))
+        self._mode_selector = ctk.CTkSegmentedButton(frame, values=[MODE_CYCLE, MODE_CONTINUOUS],
+                                                     command=self._set_run_mode)
+        self._mode_selector.set(MODE_CYCLE)
+        self._mode_selector.grid(row=0, column=0, sticky="w", padx=8, pady=(6, 2))
+
+        panel = ctk.CTkFrame(frame, fg_color="transparent")
+        panel.grid(row=1, column=0, sticky="nsew")
+        panel.grid_columnconfigure(0, weight=1)
+        self._cycle_panel = panel
 
         # Column headers
-        hdr = ctk.CTkFrame(frame, fg_color="transparent")
+        hdr = ctk.CTkFrame(panel, fg_color="transparent")
         hdr.grid(row=1, column=0, sticky="ew", padx=4)
         for col, (label, w) in enumerate(zip(StepRow.COLS, StepRow.WIDTHS)):
             ctk.CTkLabel(hdr, text=label, width=w, anchor="center",
@@ -358,9 +377,9 @@ class App(ctk.CTk):
                 row=0, column=col, padx=1)
 
         # Scrollable step list
-        self._step_scroll = ctk.CTkScrollableFrame(frame, width=290, height=320)
+        self._step_scroll = ctk.CTkScrollableFrame(panel, width=290, height=320)
         self._step_scroll.grid(row=2, column=0, sticky="nsew", padx=4, pady=4)
-        frame.grid_rowconfigure(2, weight=1)
+        panel.grid_rowconfigure(2, weight=1)
 
         self._step_rows: list[StepRow] = []
         # Add two default steps
@@ -371,23 +390,93 @@ class App(ctk.CTk):
         self._select_row(0)
 
         # Buttons
-        btn_bar = ctk.CTkFrame(frame, fg_color="transparent")
+        btn_bar = ctk.CTkFrame(panel, fg_color="transparent")
         btn_bar.grid(row=3, column=0, sticky="w", padx=4, pady=(0, 2))
-        ctk.CTkButton(btn_bar, text="+ Add", width=70,
-                      command=self._add_step).pack(side="left", padx=2)
-        ctk.CTkButton(btn_bar, text="Remove", width=70,
-                      command=self._remove_step).pack(side="left", padx=2)
-        ctk.CTkButton(btn_bar, text="↑", width=36,
-                      command=self._move_up).pack(side="left", padx=2)
-        ctk.CTkButton(btn_bar, text="↓", width=36,
-                      command=self._move_down).pack(side="left", padx=2)
+        self._step_btns = [
+            ctk.CTkButton(btn_bar, text="+ Add", width=70, command=self._add_step),
+            ctk.CTkButton(btn_bar, text="Remove", width=70, command=self._remove_step),
+            ctk.CTkButton(btn_bar, text="↑", width=36, command=self._move_up),
+            ctk.CTkButton(btn_bar, text="↓", width=36, command=self._move_down),
+        ]
+        for btn in self._step_btns:
+            btn.pack(side="left", padx=2)
 
         # Validation warning label
         self._editor_warning_label = ctk.CTkLabel(
-            frame, text="", text_color="#ff4444",
+            panel, text="", text_color="#ff4444",
             font=("Consolas", 11), anchor="w")
         self._editor_warning_label.grid(row=4, column=0, sticky="ew",
                                          padx=8, pady=(0, 4))
+
+        self._build_continuous(frame)
+
+    # --- Continuous mode ---
+    def _build_continuous(self, frame):
+        panel = ctk.CTkFrame(frame, fg_color="transparent")
+        panel.grid(row=1, column=0, sticky="nsew", padx=8, pady=(8, 4))
+        panel.grid_remove()  # Cycle Editor is shown first
+        self._continuous_panel = panel
+
+        ctk.CTkLabel(panel, text="Voltage (V)", width=90, anchor="w").grid(
+            row=0, column=0, sticky="w", pady=4)
+        self._cont_voltage_entry = ctk.CTkEntry(panel, width=90, justify="center",
+                                                font=("Consolas", 12))
+        self._cont_voltage_entry.insert(0, "24.0")
+        self._cont_voltage_entry.grid(row=0, column=1, sticky="w", pady=4)
+
+        ctk.CTkLabel(panel, text="Current (A)", width=90, anchor="w").grid(
+            row=1, column=0, sticky="w", pady=4)
+        self._cont_current_entry = ctk.CTkEntry(panel, width=90, justify="center",
+                                                font=("Consolas", 12))
+        self._cont_current_entry.insert(0, "MAX")
+        self._cont_current_entry.grid(row=1, column=1, sticky="w", pady=4)
+
+        self._cont_set_btn = ctk.CTkButton(panel, text="Set", width=90,
+                                           command=self._apply_continuous, state="disabled")
+        self._cont_set_btn.grid(row=2, column=1, sticky="w", pady=4)
+        for entry in (self._cont_voltage_entry, self._cont_current_entry):
+            entry.bind("<Return>", self._apply_continuous)
+
+        self._cont_active_label = ctk.CTkLabel(panel, text="Output: off", anchor="w",
+                                               font=("Consolas", 12))
+        self._cont_active_label.grid(row=3, column=0, columnspan=2, sticky="w", pady=(12, 2))
+
+        ctk.CTkLabel(panel, text="Holds the voltage and logs to a CSV in the\n"
+                                 "logs folder until Stop. Press Set or Enter\n"
+                                 "to change the output during the run.",
+                     text_color="#888888", font=("", 11), justify="left", anchor="w").grid(
+            row=4, column=0, columnspan=2, sticky="w", pady=(2, 0))
+
+    def _set_run_mode(self, mode: str):
+        self._run_mode = mode
+        if mode == MODE_CONTINUOUS:
+            self._cycle_panel.grid_remove()
+            self._continuous_panel.grid()
+        else:
+            self._continuous_panel.grid_remove()
+            self._cycle_panel.grid()
+        self._update_cycle_controls()
+
+    def _update_cycle_controls(self):
+        """Cycle settings can only be edited in Cycle Editor mode with nothing running."""
+        cycle_mode = self._run_mode == MODE_CYCLE
+        editable = cycle_mode and not self._running
+        state = "normal" if editable else "disabled"
+
+        for row in self._step_rows:
+            row.set_locked(not editable)
+        for btn in self._step_btns:
+            btn.configure(state=state)
+        self._load_btn.configure(state=state)
+        self._save_btn.configure(state="normal" if cycle_mode else "disabled")
+
+        colors = self._loops_colors
+        self._loops_entry.configure(state=state,
+                                    text_color=colors["text"] if editable else "#666666",
+                                    fg_color=colors["fg"] if editable else "#2b2b2b",  # same as the bar
+                                    border_color=colors["border"] if editable else "#444444")
+        self._loops_label.configure(text_color=colors["label"] if editable else "#666666")
+        self._loops_hint.configure(text_color="#888888" if editable else "#666666")
 
     # --- Live monitor ---
     def _build_monitor(self):
@@ -442,12 +531,21 @@ class App(ctk.CTk):
         # Row 1 — loops group, tightly packed
         loops_row = ctk.CTkFrame(left, fg_color="transparent")
         loops_row.pack(anchor="w")
-        ctk.CTkLabel(loops_row, text="Loops:").pack(side="left", padx=(0, 8))
+        self._loops_label = ctk.CTkLabel(loops_row, text="Loops:")
+        self._loops_label.pack(side="left", padx=(0, 8))
         self._loops_entry = ctk.CTkEntry(loops_row, width=52, justify="center")
         self._loops_entry.insert(0, "1")
         self._loops_entry.pack(side="left")
-        ctk.CTkLabel(loops_row, text="(0 = ∞)", text_color="#888888",
-                     font=("", 11)).pack(side="left", padx=(10, 0))
+        self._loops_hint = ctk.CTkLabel(loops_row, text="(0 = ∞)", text_color="#888888",
+                                        font=("", 11))
+        self._loops_hint.pack(side="left", padx=(10, 0))
+        # Normal colours, restored when leaving Continuous
+        self._loops_colors = {
+            "label": self._loops_label.cget("text_color"),
+            "text": self._loops_entry.cget("text_color"),
+            "fg": self._loops_entry.cget("fg_color"),
+            "border": self._loops_entry.cget("border_color"),
+        }
 
         # Row 2 — fixed-width progress labels, locked so nothing shifts
         prog_row = ctk.CTkFrame(left, fg_color="transparent")
@@ -480,10 +578,12 @@ class App(ctk.CTk):
         right = ctk.CTkFrame(bar, fg_color="transparent")
         right.pack(side="right", padx=12, pady=8)
 
-        ctk.CTkButton(right, text="💾 Save Profile", width=130,
-                      command=self._save_profile).pack(pady=2)
-        ctk.CTkButton(right, text="📂 Load Profile", width=130,
-                      command=self._load_profile).pack(pady=2)
+        self._save_btn = ctk.CTkButton(right, text="💾 Save Profile", width=130,
+                                       command=self._save_profile)
+        self._save_btn.pack(pady=2)
+        self._load_btn = ctk.CTkButton(right, text="📂 Load Profile", width=130,
+                                       command=self._load_profile)
+        self._load_btn.pack(pady=2)
 
     # -----------------------------------------------------------------------
     # Port helpers
@@ -704,26 +804,20 @@ class App(ctk.CTk):
         if not self._driver or not self._driver.connected:
             messagebox.showerror("Error", "Not connected to PSU.")
             return
+        if self._run_mode == MODE_CONTINUOUS:
+            self._run_continuous()
+        else:
+            self._run_cycle()
+
+    def _run_cycle(self):
         steps = self._get_steps()
         if steps is None:
             return
         loops = self._get_loops()
         if loops is None:
             return
-
-        try:
-            self._driver.set_mode(self._mode)  # re-apply selected mode before run
-        except Exception as exc:
-            messagebox.showerror("PSU Error", str(exc))
+        if not self._prepare_run(infinite=loops == 0):
             return
-
-        self._plot.reset(INFINITE_RUN_MAX_SAMPLES if loops == 0 else None)  # clear previous run data
-        self._plot_started = False  # block samples until first dwell begins
-        with self._measure_lock:
-            self._pending_samples.clear()
-        if loops == 0:
-            self._open_log()
-        self._set_run_state(True)
         self._total_steps = len(steps)
         self._total_loops = loops
 
@@ -740,13 +834,81 @@ class App(ctk.CTk):
         )
         self._runner.start()
 
+    def _run_continuous(self):
+        target = self._get_continuous_target()
+        if target is None or not self._prepare_run(infinite=True):
+            return
+        voltage, current = target
+        self._show_continuous_output(voltage, current)
+
+        self._runner = ContinuousRunner(
+            self._driver, voltage, current,
+            on_dwell_tick=self._cb_elapsed,
+            on_measure=self._cb_measure,
+            on_done=self._cb_done,
+            on_error=self._cb_error,
+        )
+        self._runner.start()
+
+    def _prepare_run(self, infinite: bool) -> bool:
+        try:
+            self._driver.set_mode(self._mode)  # re-apply selected mode before run
+        except Exception as exc:
+            messagebox.showerror("PSU Error", str(exc))
+            return False
+
+        self._plot.reset(INFINITE_RUN_MAX_SAMPLES if infinite else None)  # clear previous run data
+        self._plot_started = False  # block samples until first dwell begins
+        with self._measure_lock:
+            self._pending_samples.clear()
+        if infinite:
+            self._open_log()
+        self._set_run_state(True)
+        return True
+
+    def _get_continuous_target(self) -> tuple[float, float] | None:
+        max_v = StepRow._cls_max_voltage
+        max_i = StepRow._cls_max_current
+        try:
+            voltage = float(self._cont_voltage_entry.get())
+            raw_current = self._cont_current_entry.get().strip().upper()
+            current = max_i if raw_current == "MAX" else float(raw_current)
+        except ValueError as exc:
+            messagebox.showerror("Invalid input", str(exc))
+            return None
+        if not _in_range(voltage, 0.0, max_v):
+            messagebox.showerror("Out of range",
+                                 f"Voltage {voltage} V is outside the PSU range of 0–{max_v} V")
+            return None
+        if not _in_range(current, 0.0, max_i):
+            messagebox.showerror("Out of range",
+                                 f"Current {current} A is outside the PSU range of 0–{max_i} A")
+            return None
+        return voltage, current
+
+    def _apply_continuous(self, _event=None):
+        if not isinstance(self._runner, ContinuousRunner):
+            return
+        target = self._get_continuous_target()
+        if target is None:
+            return
+        self._runner.set_target(*target)
+        self._show_continuous_output(*target)
+
+    def _show_continuous_output(self, voltage: float, current: float):
+        self._cont_active_label.configure(text=f"Output: {voltage:.3f} V / {current:.3f} A limit")
+
     def _stop(self):
         if self._runner:
             self._runner.stop()
 
     def _set_run_state(self, running: bool):
+        self._running = running
+        self._update_cycle_controls()
         self._run_btn.configure(state="disabled" if running else "normal")
         self._stop_btn.configure(state="normal" if running else "disabled")
+        self._cont_set_btn.configure(state="normal" if running else "disabled")
+        self._mode_selector.configure(state="disabled" if running else "normal")
 
     # -----------------------------------------------------------------------
     # Runner callbacks (called from background thread → schedule via after)
@@ -757,11 +919,18 @@ class App(ctk.CTk):
         self.after(0, lambda: self._highlight_step(step_idx))
 
     def _cb_dwell(self, remaining: float):
+        self._start_plot()
+        self.after(0, lambda r=remaining: self._update_dwell(r))
+
+    def _cb_elapsed(self, elapsed: float):
+        self._start_plot()
+        self.after(0, lambda e=elapsed: self._update_elapsed(e))
+
+    def _start_plot(self):
         if not self._plot_started:
             with self._measure_lock:
                 self._pending_samples.clear()  # discard ramp samples
                 self._plot_started = True      # set inside lock — atomic with the flush
-        self.after(0, lambda r=remaining: self._update_dwell(r))
 
     def _cb_measure(self, t: float, v: float, i: float):
         with self._measure_lock:
@@ -791,6 +960,11 @@ class App(ctk.CTk):
     def _update_dwell(self, remaining: float):
         self._dwell_label.configure(text=f"Dwell: {remaining:.0f}s left")
 
+    def _update_elapsed(self, elapsed: float):
+        minutes, seconds = divmod(int(elapsed), 60)
+        hours, minutes = divmod(minutes, 60)
+        self._dwell_label.configure(text=f"Time: {hours}:{minutes:02}:{seconds:02}")
+
     def _highlight_step(self, active_idx: int):
         for i, row in enumerate(self._step_rows):
             row.highlight(i == active_idx)
@@ -803,6 +977,7 @@ class App(ctk.CTk):
         self._step_label.configure(text="Step: –/–")
         self._loop_label.configure(text="Loop: –/–")
         self._dwell_label.configure(text="Dwell: –")
+        self._cont_active_label.configure(text="Output: off")
         for row in self._step_rows:
             row.highlight(False)
         if self._after_stop:

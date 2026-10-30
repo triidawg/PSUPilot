@@ -98,76 +98,83 @@ class CycleRunner:
             remaining = deadline - time.monotonic()
             time.sleep(max(0, min(0.05, remaining)))
 
-    def _run(self):
-        try:
-            # Always start from a safe state regardless of what the PSU was
-            # left at by a previous run.
-            self._psu.set_voltage(0.0)
-            self._psu.set_current(0.0)
+    def _start_output(self) -> bool:
+        """Turn the output on from a safe state regardless of what the PSU was
+        left at by a previous run. Returns False if stopped."""
+        self._psu.set_voltage(0.0)
+        self._psu.set_current(0.0)
+        if self._stop_event.is_set():
+            return False
+        self._psu.output_on()
+        return True
+
+    def _execute(self):
+        if not self._start_output():
+            return
+        loop = 0
+        prev_voltage = 0.0  # set once only: later loops continue from the last step's voltage
+        while True:
             if self._stop_event.is_set():
                 return
-            self._psu.output_on()
-            loop = 0
-            prev_voltage = 0.0  # set once only: later loops continue from the last step's voltage
-            while True:
+            loop += 1
+
+            for step_idx, step in enumerate(self._steps):
                 if self._stop_event.is_set():
                     return
-                loop += 1
 
-                for step_idx, step in enumerate(self._steps):
-                    if self._stop_event.is_set():
-                        return
+                target_v = float(step["voltage"])
+                target_i = float(step["current"])
+                ramp_t = float(step["ramp"])
+                dwell_t = float(step["dwell"])
 
-                    target_v = float(step["voltage"])
-                    target_i = float(step["current"])
-                    ramp_t = float(step["ramp"])
-                    dwell_t = float(step["dwell"])
+                self._on_step(step_idx, loop)
 
-                    self._on_step(step_idx, loop)
+                # --- Set current limit first ---
+                self._psu.set_current(target_i)
 
-                    # --- Set current limit first ---
-                    self._psu.set_current(target_i)
+                # --- Ramp voltage ---
+                if ramp_t > 0:
+                    delta_v = abs(target_v - prev_voltage)
+                    n_by_volts = round(delta_v / RAMP_STEP_VOLTS)
+                    n_by_time = math.ceil(ramp_t / MAX_STEP_DELAY)
+                    n = max(1, n_by_volts, n_by_time)
+                    n = min(n, max(1, int(ramp_t / MIN_STEP_DELAY)))  # don't flood the serial link
+                    step_v = (target_v - prev_voltage) / n
+                    step_delay = ramp_t / n
+                    ramp_start = time.monotonic()
+                    for i in range(1, n + 1):
+                        if self._stop_event.is_set():
+                            return
+                        v = target_v if i == n else prev_voltage + step_v * i
+                        self._psu.set_voltage(v)
+                        # Timed from the ramp's start so command delays don't add up
+                        if not self._wait_until(ramp_start + step_delay * i):
+                            return
+                else:
+                    self._psu.set_voltage(target_v)
 
-                    # --- Ramp voltage ---
-                    if ramp_t > 0:
-                        delta_v = abs(target_v - prev_voltage)
-                        n_by_volts = round(delta_v / RAMP_STEP_VOLTS)
-                        n_by_time = math.ceil(ramp_t / MAX_STEP_DELAY)
-                        n = max(1, n_by_volts, n_by_time)
-                        n = min(n, max(1, int(ramp_t / MIN_STEP_DELAY)))  # don't flood the serial link
-                        step_v = (target_v - prev_voltage) / n
-                        step_delay = ramp_t / n
-                        ramp_start = time.monotonic()
-                        for i in range(1, n + 1):
-                            if self._stop_event.is_set():
-                                return
-                            v = target_v if i == n else prev_voltage + step_v * i
-                            self._psu.set_voltage(v)
-                            # Timed from the ramp's start so command delays don't add up
-                            if not self._wait_until(ramp_start + step_delay * i):
-                                return
-                    else:
-                        self._psu.set_voltage(target_v)
+                prev_voltage = target_v
 
-                    prev_voltage = target_v
+                # --- First step only — the rise from 0 V isn't part of the test, so the
+                # dwell and the plot start once the PSU has arrived. Any wait on later
+                # steps would stretch dips and overvoltages. ---
+                if loop == 1 and step_idx == 0 and not self._settle(target_v):
+                    return
 
-                    # --- First step only — the rise from 0 V isn't part of the test, so the
-                    # dwell and the plot start once the PSU has arrived. Any wait on later
-                    # steps would stretch dips and overvoltages. ---
-                    if loop == 1 and step_idx == 0 and not self._settle(target_v):
-                        return
+                # --- Dwell — timed from the voltage command, so it includes the PSU's rise time ---
+                if not self._wait_until(time.monotonic() + dwell_t,
+                                        on_tick=self._on_dwell_tick,
+                                        measure_margin=DWELL_END_MARGIN):
+                    return
 
-                    # --- Dwell — timed from the voltage command, so it includes the PSU's rise time ---
-                    if not self._wait_until(time.monotonic() + dwell_t,
-                                            on_tick=self._on_dwell_tick,
-                                            measure_margin=DWELL_END_MARGIN):
-                        return
+            self._on_loop_complete(loop)
 
-                self._on_loop_complete(loop)
+            if self._loops != 0 and loop >= self._loops:
+                break
 
-                if self._loops != 0 and loop >= self._loops:
-                    break
-
+    def _run(self):
+        try:
+            self._execute()
         except Exception as exc:
             self._on_error(str(exc))
         finally:
@@ -218,3 +225,45 @@ class CycleRunner:
         self._measure_failures = 0
         self._on_measure(timestamp, v, i)
         return v
+
+
+class ContinuousRunner(CycleRunner):
+    """
+    Holds one voltage until stopped, measuring all the while.
+
+    set_target() changes the voltage and current limit during the run.
+    on_dwell_tick receives the seconds elapsed since the voltage was reached.
+    Step and loop callbacks are not used.
+    """
+
+    def __init__(self, psu, voltage: float, current: float, **callbacks):
+        super().__init__(psu, [], 0, **callbacks)
+        self._voltage = voltage
+        self._current = current
+        self._pending_target: tuple[float, float] | None = None
+        self._target_lock = threading.Lock()
+
+    def set_target(self, voltage: float, current: float):
+        """Thread-safe. The runner applies it within about 50 ms."""
+        with self._target_lock:
+            self._pending_target = (voltage, current)
+
+    def _execute(self):
+        if not self._start_output():
+            return
+        self._psu.set_current(self._current)
+        self._psu.set_voltage(self._voltage)
+        if not self._settle(self._voltage):
+            return
+
+        started = time.monotonic()
+        while not self._stop_event.is_set():
+            with self._target_lock:
+                target, self._pending_target = self._pending_target, None
+            if target is not None:
+                voltage, current = target
+                self._psu.set_current(current)
+                self._psu.set_voltage(voltage)
+            self._on_dwell_tick(time.monotonic() - started)
+            self._measure_if_due()
+            time.sleep(0.05)
