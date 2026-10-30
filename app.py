@@ -20,9 +20,11 @@ import serial.tools.list_ports
 from psu_driver import PSUDriver
 from cycle_runner import ContinuousRunner, CycleRunner
 from live_plot import LivePlot
+import theme
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
+theme.apply_theme()
 
 # When frozen by PyInstaller the bundled files live in sys._MEIPASS;
 # user data (profiles) must live next to the exe so they persist between runs.
@@ -49,8 +51,8 @@ MODE_CYCLE = "Cycle Editor"
 MODE_CONTINUOUS = "Continuous"
 
 # Continuous mode voltage limits; None leaves only the PSU's own maximum
-VOLTAGE_RANGES = {"0–32 VDC": 32.0, "0–150 VDC": 150.0, "Unrestricted": None}
-DEFAULT_VOLTAGE_RANGE = "0–32 VDC"
+VOLTAGE_RANGES = {"0–12 V": 12.0, "0–32 V": 32.0, "0–150 V": 150.0, "Unrestricted": None}
+DEFAULT_VOLTAGE_RANGE = "0–32 V"
 
 
 # ---------------------------------------------------------------------------
@@ -132,13 +134,15 @@ class StepRow(ctk.CTkFrame):
         cls._cls_select_callback = cb
 
     def __init__(self, master, index: int, **kwargs):
-        super().__init__(master, fg_color="transparent", **kwargs)
+        super().__init__(master, fg_color="transparent", corner_radius=theme.CONTROL_RADIUS, **kwargs)
         self._selected = False
+        self._running = False  # this step is executing
+        self._locked = False
         self._voltage_warning = ""
         self._current_warning = ""
         self._index_label = ctk.CTkLabel(self, text=str(index + 1), width=self.WIDTHS[0],
                                           anchor="center", font=("Consolas", 12))
-        self._index_label.grid(row=0, column=0, padx=1)
+        self._index_label.grid(row=0, column=0, padx=(theme.CONTROL_RADIUS, 1), pady=2)  # clear of the corners
         self._index_label.bind("<Button-1>", self._on_click)
         self.bind("<Button-1>", self._on_click)
 
@@ -148,7 +152,7 @@ class StepRow(ctk.CTkFrame):
         for col, (w, val) in enumerate(zip(self.WIDTHS[1:], defaults), start=1):
             e = ctk.CTkEntry(self, width=w, justify="center", font=("Consolas", 12))
             e.insert(0, val)
-            e.grid(row=0, column=col, padx=1)
+            e.grid(row=0, column=col, padx=1, pady=2)
             self._entries.append(e)
         self._entry_text_color = self._entries[0].cget("text_color")
 
@@ -160,12 +164,19 @@ class StepRow(ctk.CTkFrame):
 
     def select(self, active: bool):
         self._selected = active
-        if not self._selected:
-            self.configure(fg_color="transparent")
+        self._update_background()
+
+    def _update_background(self):
+        if self._running:
+            self.configure(fg_color="#1a3a5c")
+        elif self._selected and not self._locked:  # no selection shown while the editor is locked
+            self.configure(fg_color=theme.SELECTED)
         else:
-            self.configure(fg_color="#2a2a3a")
+            self.configure(fg_color="transparent")
 
     def set_locked(self, locked: bool):
+        self._locked = locked
+        self._update_background()
         for e in self._entries:
             e.configure(state="disabled" if locked else "normal",
                         text_color="#888888" if locked else self._entry_text_color)
@@ -186,7 +197,7 @@ class StepRow(ctk.CTkFrame):
             e.configure(border_color="#ff4444")
             self._voltage_warning = f"Voltage {val} V exceeds PSU max of {StepRow._cls_max_voltage} V"
         else:
-            e.configure(border_color=["#979DA2", "#565B5E"])
+            e.configure(border_color=theme.BORDER)
             self._voltage_warning = ""
         self._notify_warning()
 
@@ -194,7 +205,7 @@ class StepRow(ctk.CTkFrame):
         e = self._entries[1]
         raw = e.get().strip().upper()
         if raw == "MAX":
-            e.configure(border_color=["#979DA2", "#565B5E"])
+            e.configure(border_color=theme.BORDER)
             self._current_warning = ""
             self._notify_warning()
             return
@@ -206,7 +217,7 @@ class StepRow(ctk.CTkFrame):
             e.configure(border_color="#ff4444")
             self._current_warning = f"Current {val} A exceeds PSU max of {StepRow._cls_max_current} A"
         else:
-            e.configure(border_color=["#979DA2", "#565B5E"])
+            e.configure(border_color=theme.BORDER)
             self._current_warning = ""
         self._notify_warning()
 
@@ -261,10 +272,8 @@ class StepRow(ctk.CTkFrame):
                 e.insert(0, str(val))
 
     def highlight(self, active: bool):
-        if active:
-            self.configure(fg_color="#1a3a5c")
-        else:
-            self.configure(fg_color="#2a2a3a" if self._selected else "transparent")
+        self._running = active
+        self._update_background()
 
 
 # ---------------------------------------------------------------------------
@@ -329,8 +338,9 @@ class App(ctk.CTk):
 
     # --- Toolbar ---
     def _build_toolbar(self):
-        bar = ctk.CTkFrame(self, height=48, corner_radius=0)
-        bar.grid(row=0, column=0, columnspan=2, sticky="ew")
+        bar = ctk.CTkFrame(self, height=48, border_width=1)
+        bar.grid(row=0, column=0, columnspan=2, sticky="ew", padx=8, pady=(8, 0))
+        bar.pack_propagate(False)  # keep the height so the controls sit clear of the corners
 
         ctk.CTkLabel(bar, text="PSU:").pack(side="left", padx=(12, 4))
         driver_names = list(self._driver_map.keys()) or ["(no drivers)"]
@@ -369,18 +379,18 @@ class App(ctk.CTk):
 
     # --- Cycle editor ---
     def _build_editor(self):
-        frame = ctk.CTkFrame(self)
+        frame = ctk.CTkFrame(self, border_width=1)
         frame.grid(row=1, column=0, sticky="nsew", padx=(8, 4), pady=8)
-        frame.grid_columnconfigure(0, weight=1, minsize=320)  # keep width when panels swap
+        frame.grid_columnconfigure(0, weight=1, minsize=348)  # keep width when panels swap
         frame.grid_rowconfigure(1, weight=1)
 
         self._mode_selector = ctk.CTkSegmentedButton(frame, values=[MODE_CYCLE, MODE_CONTINUOUS],
                                                      command=self._set_run_mode)
         self._mode_selector.set(MODE_CYCLE)
-        self._mode_selector.grid(row=0, column=0, sticky="w", padx=8, pady=(6, 2))
+        self._mode_selector.grid(row=0, column=0, sticky="w", padx=12, pady=(10, 2))
 
         panel = ctk.CTkFrame(frame, fg_color="transparent")
-        panel.grid(row=1, column=0, sticky="nsew")
+        panel.grid(row=1, column=0, sticky="nsew", padx=6, pady=(0, 6))
         panel.grid_columnconfigure(0, weight=1)
         self._cycle_panel = panel
 
@@ -390,10 +400,11 @@ class App(ctk.CTk):
         for col, (label, w) in enumerate(zip(StepRow.COLS, StepRow.WIDTHS)):
             ctk.CTkLabel(hdr, text=label, width=w, anchor="center",
                          font=("", 11, "bold"), text_color="#888888").grid(
-                row=0, column=col, padx=1)
+                row=0, column=col, padx=(theme.CONTROL_RADIUS + 1, 1) if col == 0 else 1)
 
         # Scrollable step list
-        self._step_scroll = ctk.CTkScrollableFrame(panel, width=290, height=320)
+        self._step_scroll = ctk.CTkScrollableFrame(panel, width=290, height=320, fg_color=theme.PANEL,
+                                                   scrollbar_button_color=theme.CONTROL_HOVER)
         self._step_scroll.grid(row=2, column=0, sticky="nsew", padx=4, pady=4)
         panel.grid_rowconfigure(2, weight=1)
 
@@ -429,7 +440,7 @@ class App(ctk.CTk):
     # --- Continuous mode ---
     def _build_continuous(self, frame):
         panel = ctk.CTkFrame(frame, fg_color="transparent")
-        panel.grid(row=1, column=0, sticky="nsew", padx=8, pady=(8, 4))
+        panel.grid(row=1, column=0, sticky="nsew", padx=12, pady=(8, 6))
         panel.grid_remove()  # Cycle Editor is shown first
         self._continuous_panel = panel
 
@@ -492,20 +503,20 @@ class App(ctk.CTk):
         colors = self._loops_colors
         self._loops_entry.configure(state=state,
                                     text_color=colors["text"] if editable else "#666666",
-                                    fg_color=colors["fg"] if editable else "#2b2b2b",  # same as the bar
-                                    border_color=colors["border"] if editable else "#444444")
+                                    fg_color=colors["fg"] if editable else theme.PANEL,
+                                    border_color=colors["border"] if editable else theme.BORDER)
         self._loops_label.configure(text_color=colors["label"] if editable else "#666666")
         self._loops_hint.configure(text_color="#888888" if editable else "#666666")
 
     # --- Live monitor ---
     def _build_monitor(self):
-        frame = ctk.CTkFrame(self)
+        frame = ctk.CTkFrame(self, border_width=1)
         frame.grid(row=1, column=1, sticky="nsew", padx=(4, 8), pady=8)
         frame.grid_rowconfigure(1, weight=1)
         frame.grid_columnconfigure(0, weight=1)
 
         hdr = ctk.CTkFrame(frame, fg_color="transparent")
-        hdr.grid(row=0, column=0, sticky="ew", padx=8, pady=(6, 2))
+        hdr.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 2))
         hdr.grid_columnconfigure(0, weight=1)
 
         ctk.CTkLabel(hdr, text="LIVE MONITOR", font=("", 13, "bold")).grid(
@@ -516,7 +527,7 @@ class App(ctk.CTk):
                                         command=lambda: self._set_graph_mode("full"))
         self._full_btn.grid(row=0, column=1, padx=(4, 2))
         self._sweep_btn = ctk.CTkButton(hdr, text="Sweep", width=65,
-                                         fg_color="#333333", hover_color="#444444",
+                                         fg_color=theme.CONTROL, hover_color=theme.CONTROL_HOVER,
                                          command=lambda: self._set_graph_mode("sweep"))
         self._sweep_btn.grid(row=0, column=2, padx=(2, 4))
         ctk.CTkButton(hdr, text="Export CSV", width=90,
@@ -524,10 +535,10 @@ class App(ctk.CTk):
                       command=self._export_csv).grid(row=0, column=3, padx=(4, 0))
 
         self._plot = LivePlot(frame)
-        self._plot.grid(row=1, column=0, sticky="nsew", padx=0, pady=2)
+        self._plot.grid(row=1, column=0, sticky="nsew", padx=10, pady=2)
 
         readout = ctk.CTkFrame(frame, fg_color="transparent")
-        readout.grid(row=2, column=0, sticky="ew", padx=8, pady=(0, 6))
+        readout.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 10))
 
         self._v_label = ctk.CTkLabel(readout, text="V:  ---  V",
                                       font=("Consolas", 22, "bold"),
@@ -540,8 +551,8 @@ class App(ctk.CTk):
 
     # --- Controls bar ---
     def _build_controls(self):
-        bar = ctk.CTkFrame(self, height=62, corner_radius=0)
-        bar.grid(row=2, column=0, columnspan=2, sticky="ew")
+        bar = ctk.CTkFrame(self, height=62, border_width=1)
+        bar.grid(row=2, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 8))
 
         # Left side: two rows, both left-aligned
         left = ctk.CTkFrame(bar, fg_color="transparent")
@@ -616,9 +627,9 @@ class App(ctk.CTk):
     def _set_graph_mode(self, mode: str):
         self._plot.set_mode(mode)
         active   = "#1a5c8a"
-        inactive = "#333333"
+        inactive = theme.CONTROL
         active_h   = "#1e6fa8"
-        inactive_h = "#444444"
+        inactive_h = theme.CONTROL_HOVER
         self._sweep_btn.configure(
             fg_color=active   if mode == "sweep" else inactive,
             hover_color=active_h if mode == "sweep" else inactive_h)

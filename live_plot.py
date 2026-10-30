@@ -13,15 +13,20 @@ import matplotlib
 matplotlib.use("TkAgg")
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.transforms import blended_transform_factory
+
+import theme
 
 WINDOW_SECONDS = 60
 MAX_PLOT_POINTS = 2000  # drawn points only — the full buffer is kept for CSV export
 MAX_SAMPLES = 1_512_000  # about a week at 2.5 Hz; older samples drop off, the log file keeps them
+Y_LABEL_X_INCHES = 0.16  # from the figure's left edge, so both labels line up whatever the tick widths
+LEFT_MARGIN_INCHES = 0.65  # fixed, so the labels keep their distance from the ticks at any window size
 
 
 class LivePlot(tk.Frame):
     def __init__(self, master, **kwargs):
-        kwargs.setdefault("bg", "#1a1a2e")
+        kwargs.setdefault("bg", theme.PANEL)
         super().__init__(master, **kwargs)
 
         self._t0 = time.monotonic()
@@ -33,10 +38,10 @@ class LivePlot(tk.Frame):
         self._mode = "full"  # 'sweep' | 'full'
 
         # ---- Matplotlib figure ----
-        self._fig = Figure(figsize=(5, 3), dpi=96, facecolor="#1a1a2e")
+        self._fig = Figure(figsize=(5, 3), dpi=96, facecolor=theme.PANEL)
         self._ax_v = self._fig.add_subplot(211)
         self._ax_i = self._fig.add_subplot(212, sharex=self._ax_v)
-        self._fig.subplots_adjust(left=0.06, right=0.99, top=0.98, bottom=0.06, hspace=0.10)
+        self._fig.subplots_adjust(left=0.075, right=0.99, top=0.98, bottom=0.09, hspace=0.12)
 
         self._line_v, = self._ax_v.plot([], [], color="#00d4ff", linewidth=1.5)
         self._line_i, = self._ax_i.plot([], [], color="#ff9900", linewidth=1.5)
@@ -45,21 +50,27 @@ class LivePlot(tk.Frame):
             (self._ax_v, "Voltage (V)", "#00d4ff"),
             (self._ax_i, "Current (A)", "#ff9900"),
         ]:
-            ax.set_facecolor("#0d0d1a")
-            ax.set_ylabel(label, color=color, fontsize=8, rotation=90, labelpad=4)
+            ax.set_facecolor(theme.WELL)
+            ax.set_ylabel(label, color=color, fontsize=8, rotation=90)
+            ax.yaxis.set_label_coords(Y_LABEL_X_INCHES, 0.5, transform=blended_transform_factory(
+                self._fig.dpi_scale_trans, ax.transAxes))
             ax.tick_params(colors="#aaaaaa", labelsize=7)
             for spine in ax.spines.values():
-                spine.set_edgecolor("#333355")
+                spine.set_edgecolor(theme.BORDER)
             ax.yaxis.label.set_color(color)
 
         self._ax_i.set_xlabel("Time (s)", color="#aaaaaa", fontsize=8, labelpad=2)
 
         self._mpl_canvas = FigureCanvasTkAgg(self._fig, master=self)
         self._mpl_canvas.get_tk_widget().pack(fill="both", expand=True)
+        self._mpl_canvas.mpl_connect("resize_event", self._on_resize)
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    def _on_resize(self, _event):
+        self._fig.subplots_adjust(left=LEFT_MARGIN_INCHES / self._fig.get_figwidth())
 
     def set_mode(self, mode: str):
         """Set display mode: 'sweep' or 'full'."""
