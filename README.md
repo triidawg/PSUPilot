@@ -12,7 +12,7 @@ A Windows desktop application for programming and monitoring the **GW Instek PSW
 - **Software Ramping** — smooth voltage ramps simulated in software (~50 sub-steps), since the PSW160 has no native ramp command
 - **Loop Control** — repeat sequences 1–∞ times with a live loop counter
 - **Live Monitor** — real-time voltage and current plot (matplotlib, ~2.5 Hz), plus large numeric readouts
-- **Run Controls** — Run / Pause / Stop with per-step progress and dwell countdown
+- **Run Controls** — Run / Stop with per-step progress and dwell countdown
 - **Save / Load Profiles** — cycle steps saved as human-readable `.json` files
 - **Multi-PSU Driver System** — add support for new PSU models by dropping a JSON driver file into `drivers/` — no code changes needed
 

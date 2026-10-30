@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 profiles/
+logs/
 .claude/
 build/
 dist/

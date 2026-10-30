@@ -3,6 +3,8 @@ psu_driver.py — Loads a JSON driver file and wraps pyvisa communication.
 """
 
 import json
+import threading
+
 import pyvisa
 
 
@@ -24,28 +26,37 @@ class PSUDriver:
 
         self._rm: pyvisa.ResourceManager | None = None
         self._inst = None
+        self._lock = threading.Lock()  # runner thread and UI thread share the serial link
 
     # ------------------------------------------------------------------
     # Connection
     # ------------------------------------------------------------------
 
     def connect(self, port: str) -> None:
-        """Open a pyvisa-py serial connection on *port* (e.g. 'COM3')."""
-        self._rm = pyvisa.ResourceManager("@py")
-        # pyvisa-py expects ASRL4::INSTR not ASRLCOM4::INSTR
-        port_num = port.upper().replace("COM", "")
-        resource_str = f"ASRL{port_num}::INSTR"
-        self._inst = self._rm.open_resource(resource_str)
-        self._inst.read_termination = self._term
-        self._inst.write_termination = self._term
-        self._inst.timeout = 3000  # ms
-        self.set_mode("cv")  # default to CV on connect
+        """Open a pyvisa-py serial connection on *port* (e.g. 'COM3').
+        Sends nothing to the PSU, so verify_idn() can run before any command."""
+        try:
+            self._rm = pyvisa.ResourceManager("@py")
+            # pyvisa-py expects ASRL4::INSTR not ASRLCOM4::INSTR
+            port_num = port.upper().replace("COM", "")
+            resource_str = f"ASRL{port_num}::INSTR"
+            self._inst = self._rm.open_resource(resource_str)
+            self._inst.read_termination = self._term
+            self._inst.write_termination = self._term
+            self._inst.timeout = 3000  # ms
+        except Exception:
+            self.close()
+            raise
 
     def disconnect(self) -> None:
         try:
             self.output_off()
         except Exception:
             pass
+        self.close()
+
+    def close(self) -> None:
+        """Close the port without sending anything to the PSU."""
         if self._inst is not None:
             try:
                 self._inst.close()
@@ -68,14 +79,16 @@ class PSUDriver:
     # ------------------------------------------------------------------
 
     def _write(self, cmd: str) -> None:
-        if self._inst is None:
-            raise RuntimeError("Not connected to PSU.")
-        self._inst.write(cmd)
+        with self._lock:
+            if self._inst is None:
+                raise RuntimeError("Not connected to PSU.")
+            self._inst.write(cmd)
 
     def _query(self, cmd: str) -> str:
-        if self._inst is None:
-            raise RuntimeError("Not connected to PSU.")
-        return self._inst.query(cmd).strip()
+        with self._lock:
+            if self._inst is None:
+                raise RuntimeError("Not connected to PSU.")
+            return self._inst.query(cmd).strip()
 
     def query_idn(self) -> str:
         """Send *IDN? and return the raw response string."""

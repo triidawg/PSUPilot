@@ -46,7 +46,7 @@ A desktop GUI application for Windows that allows easy programming of the **GW I
 - Plot scrolls to show last N seconds of data
 
 ### 5. Run Controls
-- ▶ Run, ⏸ Pause, ⏹ Stop buttons
+- ▶ Run, ⏹ Stop buttons
 - Progress indicator: current step, loop number, time remaining in dwell
 - Output is turned OFF safely on stop or on app close
 
@@ -103,7 +103,7 @@ Each supported PSU has its own JSON driver file in a `drivers/` folder. The app 
 │ [+Add][Remove][↑][↓]      │                            │
 ├───────────────────────────┴────────────────────────────┤
 │  Loops: [3]   Step: 2/3   Loop: 1/3   Dwell: 12s left  │
-│  [▶ Run]  [⏸ Pause]  [⏹ Stop]                          │
+│  [▶ Run]  [⏹ Stop]                                     │
 │  [💾 Save Profile]   [📂 Load Profile]                  │
 └────────────────────────────────────────────────────────┘
 ```
@@ -152,5 +152,5 @@ psw_controller/
 - CustomTkinter supports both light and dark mode — default to dark
 - The matplotlib plot should be embedded using `FigureCanvasTkAgg`
 - Ramp logic should run in a background thread to keep the UI responsive
-- Use `threading.Event` for pause/stop signalling to the runner thread
+- Use `threading.Event` for stop signalling to the runner thread
 

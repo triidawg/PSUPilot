@@ -4,11 +4,14 @@ app.py — Main CustomTkinter application window.
 
 import csv
 import json
+import math
 import os
 import sys
 import glob
 import threading
+import time
 import tkinter as tk
+from collections import deque
 from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
@@ -31,12 +34,16 @@ else:
     _DATA_DIR = os.path.dirname(__file__)
 
 PROFILES_DIR = os.path.join(_DATA_DIR, "profiles")
+LOGS_DIR = os.path.join(_DATA_DIR, "logs")
 DRIVERS_DIR = os.path.join(_RESOURCE_DIR, "drivers")
 # User-added drivers live next to the exe/script so they survive rebuilds.
 USER_DRIVERS_DIR = os.path.join(_DATA_DIR, "drivers")
 
 os.makedirs(PROFILES_DIR, exist_ok=True)
 os.makedirs(USER_DRIVERS_DIR, exist_ok=True)
+
+# Infinite runs log to a file; the plot keeps only about the last 22 hours at 2.5 Hz.
+INFINITE_RUN_MAX_SAMPLES = 200_000
 
 
 # ---------------------------------------------------------------------------
@@ -67,6 +74,10 @@ def _load_driver_names() -> dict[str, str]:
 def _list_com_ports() -> list[str]:
     ports = [p.device for p in serial.tools.list_ports.comports()]
     return ports if ports else ["(none)"]
+
+
+def _in_range(value: float, low: float, high: float) -> bool:
+    return math.isfinite(value) and low <= value <= high
 
 
 def _read_psu_limits(path: str) -> tuple[float, float]:
@@ -112,6 +123,8 @@ class StepRow(ctk.CTkFrame):
     def __init__(self, master, index: int, **kwargs):
         super().__init__(master, fg_color="transparent", **kwargs)
         self._selected = False
+        self._voltage_warning = ""
+        self._current_warning = ""
         self._index_label = ctk.CTkLabel(self, text=str(index + 1), width=self.WIDTHS[0],
                                           anchor="center", font=("Consolas", 12))
         self._index_label.grid(row=0, column=0, padx=1)
@@ -154,21 +167,19 @@ class StepRow(ctk.CTkFrame):
             return
         if val > StepRow._cls_max_voltage:
             e.configure(border_color="#ff4444")
-            if StepRow._cls_warning_callback:
-                StepRow._cls_warning_callback(
-                    f"Voltage {val} V exceeds PSU max of {StepRow._cls_max_voltage} V")
+            self._voltage_warning = f"Voltage {val} V exceeds PSU max of {StepRow._cls_max_voltage} V"
         else:
             e.configure(border_color=["#979DA2", "#565B5E"])
-            if StepRow._cls_warning_callback:
-                StepRow._cls_warning_callback("")
+            self._voltage_warning = ""
+        self._notify_warning()
 
     def _on_current_focusout(self, _event=None):
         e = self._entries[1]
         raw = e.get().strip().upper()
         if raw == "MAX":
             e.configure(border_color=["#979DA2", "#565B5E"])
-            if StepRow._cls_warning_callback:
-                StepRow._cls_warning_callback("")
+            self._current_warning = ""
+            self._notify_warning()
             return
         try:
             val = float(raw)
@@ -176,13 +187,19 @@ class StepRow(ctk.CTkFrame):
             return
         if val > StepRow._cls_max_current:
             e.configure(border_color="#ff4444")
-            if StepRow._cls_warning_callback:
-                StepRow._cls_warning_callback(
-                    f"Current {val} A exceeds PSU max of {StepRow._cls_max_current} A")
+            self._current_warning = f"Current {val} A exceeds PSU max of {StepRow._cls_max_current} A"
         else:
             e.configure(border_color=["#979DA2", "#565B5E"])
-            if StepRow._cls_warning_callback:
-                StepRow._cls_warning_callback("")
+            self._current_warning = ""
+        self._notify_warning()
+
+    def _notify_warning(self):
+        if StepRow._cls_warning_callback:
+            StepRow._cls_warning_callback()
+
+    def warning(self) -> str:
+        """This row's limit problem, or '' if it has none."""
+        return self._voltage_warning or self._current_warning
 
     def revalidate(self):
         """Re-run border-colour validation after PSU limits change."""
@@ -250,9 +267,13 @@ class App(ctk.CTk):
         self._driver_map = _load_driver_names()
 
         # Pending measurement from runner thread
-        self._pending_measure: tuple[float, float] | None = None
+        self._pending_samples: deque[tuple[float, float, float]] = deque()
         self._measure_lock = threading.Lock()
         self._plot_started = False
+
+        self._after_stop = None   # runs once the current run has fully ended
+        self._log_file = None     # CSV log for infinite runs
+        self._log_writer = None
 
         self._build_ui()
 
@@ -450,15 +471,10 @@ class App(ctk.CTk):
                                        command=self._run)
         self._run_btn.grid(row=0, column=0, padx=4)
 
-        self._pause_btn = ctk.CTkButton(mid, text="⏸ Pause", width=90,
-                                         fg_color="#5a5a00", hover_color="#7a7a00",
-                                         command=self._pause, state="disabled")
-        self._pause_btn.grid(row=0, column=1, padx=4)
-
         self._stop_btn = ctk.CTkButton(mid, text="⏹ Stop", width=90,
                                         fg_color="#6a1a1a", hover_color="#8a2a2a",
                                         command=self._stop, state="disabled")
-        self._stop_btn.grid(row=0, column=2, padx=4)
+        self._stop_btn.grid(row=0, column=1, padx=4)
 
         # Right: save/load
         right = ctk.CTkFrame(bar, fg_color="transparent")
@@ -537,33 +553,37 @@ class App(ctk.CTk):
         try:
             self._driver = PSUDriver(path)
             self._driver.connect(port)
-            self._status_label.configure(
-                text=f"{self._driver.full_name}  |  {port}",
-                text_color="#55ff55")
-            self._connect_btn.configure(text="Disconnect")
-            self._psu_combo.configure(state="disabled")
-            # Identity check — abort if PSU doesn't match the selected driver
+            # Identity check — abort before sending any command if the PSU
+            # doesn't match the selected driver
             match, idn = self._driver.verify_idn()
             if not match:
-                self._driver.disconnect()
+                self._driver.close()
                 self._driver = None
-                self._status_label.configure(text="Disconnected", text_color="#ff5555")
-                self._connect_btn.configure(text="Connect")
-                self._psu_combo.configure(state="normal")
                 messagebox.showerror(
                     "PSU Mismatch",
                     f"Selected driver: {driver_name}\n"
                     f"PSU responded:   {idn}\n\n"
                     "Connection refused — select the correct driver and try again."
                 )
+                return
+            self._driver.set_mode(self._mode)
+            self._status_label.configure(
+                text=f"{self._driver.full_name}  |  {port}",
+                text_color="#55ff55")
+            self._connect_btn.configure(text="Disconnect")
+            self._psu_combo.configure(state="disabled")
         except Exception as exc:
+            if self._driver:
+                self._driver.close()
             self._driver = None
-            self._psu_combo.configure(state="normal")
             messagebox.showerror("Connection Error", str(exc))
 
     def _disconnect(self):
         if self._runner and self._runner.is_running():
+            # Let the run turn the output off first; it disconnects when finished
+            self._after_stop = self._disconnect
             self._stop()
+            return
         if self._driver:
             self._driver.disconnect()
             self._driver = None
@@ -592,26 +612,35 @@ class App(ctk.CTk):
             r.set_index(i)
         new_idx = min(idx, len(self._step_rows) - 1)
         self._select_row(new_idx)
+        self._show_editor_warning()
 
     def _move_up(self):
         idx = self._selected_idx
         if idx <= 0 or len(self._step_rows) < 2:
             return
-        self._swap_step_values(idx, idx - 1)
-        self._select_row(idx - 1)
+        if self._swap_step_values(idx, idx - 1):
+            self._select_row(idx - 1)
 
     def _move_down(self):
         idx = self._selected_idx
         if idx >= len(self._step_rows) - 1 or len(self._step_rows) < 2:
             return
-        self._swap_step_values(idx, idx + 1)
-        self._select_row(idx + 1)
+        if self._swap_step_values(idx, idx + 1):
+            self._select_row(idx + 1)
 
-    def _swap_step_values(self, a: int, b: int):
-        va = self._step_rows[a].get_raw_values()
-        vb = self._step_rows[b].get_raw_values()
-        self._step_rows[a].set_values(vb)
-        self._step_rows[b].set_values(va)
+    def _swap_step_values(self, a: int, b: int) -> bool:
+        values = {}
+        for idx in (a, b):
+            try:
+                values[idx] = self._step_rows[idx].get_raw_values()
+            except ValueError as exc:
+                messagebox.showerror("Invalid input", f"Step {idx + 1}: {exc}")
+                return False
+        self._step_rows[a].set_values(values[b])
+        self._step_rows[b].set_values(values[a])
+        self._step_rows[a].revalidate()
+        self._step_rows[b].revalidate()
+        return True
 
     def _on_row_selected(self, row: StepRow):
         if row in self._step_rows:
@@ -622,10 +651,14 @@ class App(ctk.CTk):
         for i, row in enumerate(self._step_rows):
             row.select(i == idx)
 
-    def _show_editor_warning(self, msg: str):
+    def _show_editor_warning(self):
+        msg = next((row.warning() for row in self._step_rows if row.warning()), "")
         self._editor_warning_label.configure(text=msg)
 
     def _get_steps(self) -> list[dict] | None:
+        if not self._step_rows:
+            messagebox.showerror("Invalid input", "The cycle has no steps.")
+            return None
         steps = []
         max_v = StepRow._cls_max_voltage
         max_i = StepRow._cls_max_current
@@ -635,21 +668,36 @@ class App(ctk.CTk):
             except ValueError as exc:
                 messagebox.showerror("Invalid input", f"Step {idx + 1}: {exc}")
                 return None
-            if s["voltage"] > max_v:
+            if not _in_range(s["voltage"], 0.0, max_v):
                 messagebox.showerror("Out of range",
-                                     f"Step {idx+1}: voltage {s['voltage']} V exceeds "
-                                     f"PSU max of {max_v} V")
+                                     f"Step {idx+1}: voltage {s['voltage']} V is outside "
+                                     f"the PSU range of 0–{max_v} V")
                 return None
-            if s["current"] > max_i:
+            if not _in_range(s["current"], 0.0, max_i):
                 messagebox.showerror("Out of range",
-                                     f"Step {idx+1}: current {s['current']} A exceeds "
-                                     f"PSU max of {max_i} A")
+                                     f"Step {idx+1}: current {s['current']} A is outside "
+                                     f"the PSU range of 0–{max_i} A")
                 return None
+            for key in ("ramp", "dwell"):
+                if not math.isfinite(s[key]) or s[key] < 0:
+                    messagebox.showerror("Out of range",
+                                         f"Step {idx+1}: {key} time {s[key]} s is invalid")
+                    return None
             steps.append(s)
         return steps
 
+    def _get_loops(self) -> int | None:
+        try:
+            loops = int(self._loops_entry.get())
+        except ValueError:
+            loops = -1
+        if loops < 0:
+            messagebox.showerror("Error", "Invalid loop count.")
+            return None
+        return loops
+
     # -----------------------------------------------------------------------
-    # Run / Pause / Stop
+    # Run / Stop
     # -----------------------------------------------------------------------
 
     def _run(self):
@@ -659,15 +707,22 @@ class App(ctk.CTk):
         steps = self._get_steps()
         if steps is None:
             return
-        try:
-            loops = int(self._loops_entry.get())
-        except ValueError:
-            messagebox.showerror("Error", "Invalid loop count.")
+        loops = self._get_loops()
+        if loops is None:
             return
 
-        self._driver.set_mode(self._mode)  # re-apply selected mode before run
-        self._plot.reset()       # clear previous run data
+        try:
+            self._driver.set_mode(self._mode)  # re-apply selected mode before run
+        except Exception as exc:
+            messagebox.showerror("PSU Error", str(exc))
+            return
+
+        self._plot.reset(INFINITE_RUN_MAX_SAMPLES if loops == 0 else None)  # clear previous run data
         self._plot_started = False  # block samples until first dwell begins
+        with self._measure_lock:
+            self._pending_samples.clear()
+        if loops == 0:
+            self._open_log()
         self._set_run_state(True)
         self._total_steps = len(steps)
         self._total_loops = loops
@@ -685,26 +740,13 @@ class App(ctk.CTk):
         )
         self._runner.start()
 
-    def _pause(self):
-        if self._runner is None:
-            return
-        if self._pause_btn.cget("text") == "⏸ Pause":
-            self._runner.pause()
-            self._pause_btn.configure(text="▶ Resume")
-        else:
-            self._runner.resume()
-            self._pause_btn.configure(text="⏸ Pause")
-
     def _stop(self):
         if self._runner:
             self._runner.stop()
 
     def _set_run_state(self, running: bool):
-        state_run = "disabled" if running else "normal"
-        state_ctrl = "normal" if running else "disabled"
-        self._run_btn.configure(state=state_run)
-        self._pause_btn.configure(state=state_ctrl, text="⏸ Pause")
-        self._stop_btn.configure(state=state_ctrl)
+        self._run_btn.configure(state="disabled" if running else "normal")
+        self._stop_btn.configure(state="normal" if running else "disabled")
 
     # -----------------------------------------------------------------------
     # Runner callbacks (called from background thread → schedule via after)
@@ -717,13 +759,13 @@ class App(ctk.CTk):
     def _cb_dwell(self, remaining: float):
         if not self._plot_started:
             with self._measure_lock:
-                self._pending_measure = None   # discard ramp samples
+                self._pending_samples.clear()  # discard ramp samples
                 self._plot_started = True      # set inside lock — atomic with the flush
         self.after(0, lambda r=remaining: self._update_dwell(r))
 
-    def _cb_measure(self, v: float, i: float):
+    def _cb_measure(self, t: float, v: float, i: float):
         with self._measure_lock:
-            self._pending_measure = (v, i)
+            self._pending_samples.append((t, v, i))
 
     def _cb_loop(self, loop_idx: int):
         pass  # progress updates already handled
@@ -754,30 +796,60 @@ class App(ctk.CTk):
             row.highlight(i == active_idx)
 
     def _on_run_finished(self):
+        self._runner = None
+        self._drain_samples()
+        self._close_log()
         self._set_run_state(False)
         self._step_label.configure(text="Step: –/–")
         self._loop_label.configure(text="Loop: –/–")
         self._dwell_label.configure(text="Dwell: –")
         for row in self._step_rows:
             row.highlight(False)
+        if self._after_stop:
+            action, self._after_stop = self._after_stop, None
+            action()
 
     # -----------------------------------------------------------------------
     # Plot refresh loop (runs on main thread via after)
     # -----------------------------------------------------------------------
 
     def _plot_refresh_loop(self):
-        with self._measure_lock:
-            sample = self._pending_measure if self._plot_started else None
-            self._pending_measure = None
-
-        if sample is not None:
-            v, i = sample
-            self._plot.add_sample(v, i)
-            self._v_label.configure(text=f"V:  {v:7.3f}  V")
-            self._i_label.configure(text=f"I:  {i:7.3f}  A")
-            self._plot.refresh()
-
+        self._drain_samples()
         self.after(400, self._plot_refresh_loop)
+
+    def _drain_samples(self):
+        with self._measure_lock:
+            samples = list(self._pending_samples) if self._plot_started else []
+            self._pending_samples.clear()
+
+        if not samples:
+            return
+        for t, v, i in samples:
+            elapsed = self._plot.add_sample(t, v, i)
+            if self._log_writer:
+                self._log_writer.writerow([f"{elapsed:.3f}", f"{v:.4f}", f"{i:.4f}"])
+        if self._log_file:
+            self._log_file.flush()
+        self._v_label.configure(text=f"V:  {v:7.3f}  V")
+        self._i_label.configure(text=f"I:  {i:7.3f}  A")
+        self._plot.refresh()
+
+    def _open_log(self):
+        try:
+            os.makedirs(LOGS_DIR, exist_ok=True)
+            path = os.path.join(LOGS_DIR, time.strftime("PSUPilot_%Y%m%d_%H%M%S.csv"))
+            self._log_file = open(path, "w", newline="")
+            self._log_writer = csv.writer(self._log_file)
+            self._log_writer.writerow(["Time (s)", "Voltage (V)", "Current (A)"])
+        except Exception as exc:
+            self._close_log()
+            messagebox.showwarning("Log Error", f"Run will not be logged to a file:\n{exc}")
+
+    def _close_log(self):
+        if self._log_file:
+            self._log_file.close()
+        self._log_file = None
+        self._log_writer = None
 
     # -----------------------------------------------------------------------
     # Save / Load profiles
@@ -813,10 +885,8 @@ class App(ctk.CTk):
                 return
             steps.append(s)
 
-        try:
-            loops = int(self._loops_entry.get())
-        except ValueError:
-            messagebox.showerror("Error", "Invalid loop count.")
+        loops = self._get_loops()
+        if loops is None:
             return
 
         path = filedialog.asksaveasfilename(
@@ -852,13 +922,18 @@ class App(ctk.CTk):
                 steps = data.get("steps", [])
                 loops = data.get("loops", 1)
 
+            if not steps:
+                raise ValueError("Profile has no steps.")
+
             # Rebuild step rows
             while self._step_rows:
                 self._step_rows.pop().destroy()
             for step in steps:
                 self._add_step()
                 self._step_rows[-1].set_values(step)
+                self._step_rows[-1].revalidate()
             self._select_row(0)
+            self._show_editor_warning()
 
             # Restore loop count
             self._loops_entry.delete(0, "end")
@@ -873,7 +948,11 @@ class App(ctk.CTk):
 
     def _on_close(self):
         if self._runner and self._runner.is_running():
+            # Let the run turn the output off first; it closes the window when finished
+            self._after_stop = self._on_close
             self._stop()
+            return
         if self._driver:
             self._driver.disconnect()
+        self._close_log()
         self.destroy()

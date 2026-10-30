@@ -15,6 +15,7 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 WINDOW_SECONDS = 60
+MAX_PLOT_POINTS = 2000  # drawn points only — the full buffer is kept for CSV export
 
 
 class LivePlot(tk.Frame):
@@ -65,13 +66,15 @@ class LivePlot(tk.Frame):
         """Return (times, voltages, currents) lists — full buffer regardless of display mode."""
         return list(self._times), list(self._voltages), list(self._currents)
 
-    def add_sample(self, voltage: float, current: float):
+    def add_sample(self, timestamp: float, voltage: float, current: float) -> float:
+        """Store a sample taken at `timestamp` (time.monotonic). Returns seconds since t=0."""
         if not self._times:
-            self._t0 = time.monotonic()  # anchor t=0 to first real data point
-        t = time.monotonic() - self._t0
+            self._t0 = timestamp  # anchor t=0 to first real data point
+        t = timestamp - self._t0
         self._times.append(t)
         self._voltages.append(voltage)
         self._currents.append(current)
+        return t
 
     def refresh(self):
         if not self._times:
@@ -89,8 +92,9 @@ class LivePlot(tk.Frame):
         else:
             t_min = 0.0
 
-        self._line_v.set_data(ts, vs)
-        self._line_i.set_data(ts, cs)
+        stride = max(1, len(ts) // MAX_PLOT_POINTS)
+        self._line_v.set_data(ts[::stride], vs[::stride])
+        self._line_i.set_data(ts[::stride], cs[::stride])
 
         self._ax_v.set_xlim(t_min, t_max + 1)
         self._ax_i.set_xlim(t_min, t_max + 1)
@@ -106,11 +110,12 @@ class LivePlot(tk.Frame):
 
         self._mpl_canvas.draw_idle()
 
-    def reset(self):
+    def reset(self, max_samples: int | None = None):
+        """Clear all data. max_samples limits the buffer; older samples are then dropped."""
         self._t0 = time.monotonic()
-        self._times.clear()
-        self._voltages.clear()
-        self._currents.clear()
+        self._times = deque(maxlen=max_samples)
+        self._voltages = deque(maxlen=max_samples)
+        self._currents = deque(maxlen=max_samples)
         self._line_v.set_data([], [])
         self._line_i.set_data([], [])
         self._mpl_canvas.draw_idle()
