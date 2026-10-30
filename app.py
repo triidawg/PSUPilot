@@ -382,14 +382,14 @@ class App(ctk.CTk):
         ctk.CTkLabel(hdr, text="LIVE MONITOR", font=("", 13, "bold")).grid(
             row=0, column=0, sticky="w")
 
-        self._sweep_btn = ctk.CTkButton(hdr, text="Sweep", width=65,
-                                         fg_color="#1a5c8a", hover_color="#1e6fa8",
-                                         command=lambda: self._set_graph_mode("sweep"))
-        self._sweep_btn.grid(row=0, column=1, padx=(4, 2))
         self._full_btn = ctk.CTkButton(hdr, text="Full", width=65,
-                                        fg_color="#333333", hover_color="#444444",
+                                        fg_color="#1a5c8a", hover_color="#1e6fa8",
                                         command=lambda: self._set_graph_mode("full"))
-        self._full_btn.grid(row=0, column=2, padx=(2, 4))
+        self._full_btn.grid(row=0, column=1, padx=(4, 2))
+        self._sweep_btn = ctk.CTkButton(hdr, text="Sweep", width=65,
+                                         fg_color="#333333", hover_color="#444444",
+                                         command=lambda: self._set_graph_mode("sweep"))
+        self._sweep_btn.grid(row=0, column=2, padx=(2, 4))
         ctk.CTkButton(hdr, text="Export CSV", width=90,
                       fg_color="#2d4a2d", hover_color="#3a6a3a",
                       command=self._export_csv).grid(row=0, column=3, padx=(4, 0))
@@ -490,6 +490,7 @@ class App(ctk.CTk):
         self._full_btn.configure(
             fg_color=active   if mode == "full" else inactive,
             hover_color=active_h if mode == "full" else inactive_h)
+        self._plot.refresh()  # redraw now — no new samples arrive once a cycle has ended
 
     # -----------------------------------------------------------------------
     # PSU selection / limits

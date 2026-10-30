@@ -26,7 +26,7 @@ class LivePlot(tk.Frame):
         self._times: deque[float] = deque()
         self._voltages: deque[float] = deque()
         self._currents: deque[float] = deque()
-        self._mode = "sweep"  # 'sweep' | 'full'
+        self._mode = "full"  # 'sweep' | 'full'
 
         # ---- Matplotlib figure ----
         self._fig = Figure(figsize=(5, 3), dpi=96, facecolor="#1a1a2e")
